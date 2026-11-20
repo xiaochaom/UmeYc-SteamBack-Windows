@@ -226,3 +226,87 @@ def test_initial_download_into_empty_folder_can_be_undone(setup, tmp_path):
     e.restore(g, before["id"])
     assert not (empty / "slot.sav").exists()
     assert any(b["source"] == "before_restore" for b in e.backups(g))
+
+
+def test_direct_download_binds_deck_auto_keys_without_expanding_selected_files(setup):
+    e, g, source, client, cloud = setup
+    keys = ["proton/drive_c/users/steamuser/AppData/Local/Test/Saved"]
+    second = source / "other.sav"
+    second.write_bytes(b"second cloud save")
+    selected = [str(source / "slot.sav"), str(second)]
+    e.configure(g, selected, keys, "auto")
+    cloud.upload(123, g)
+    e.configure(g, selected)
+    (source / "slot.sav").write_bytes(b"new local save")
+    second.write_bytes(b"second local save")
+    unrelated = source / "untouched.ini"
+    unrelated.write_bytes(b"preserve")
+    cloud.download_current(123, g)
+    assert (source / "slot.sav").read_bytes() == b"chapter one"
+    assert second.read_bytes() == b"second cloud save"
+    assert unrelated.read_bytes() == b"preserve"
+    assert e.settings(g)["paths"] == selected
+    assert e.settings(g)["keys"] == keys
+    assert e.settings(g)["mode"] == "auto"
+    assert e._custom_plan(g)["custom_files"] == {"": ["other.sav", "slot.sav"]}
+
+
+def test_direct_download_cannot_expand_single_file_to_whole_directory(setup):
+    e, g, source, client, cloud = setup
+    keys = ["proton/Test/Saved"]
+    (source / "other.sav").write_bytes(b"cloud other")
+    e.configure(g, [str(source)], keys, "auto")
+    cloud.upload(123, g)
+    e.configure(g, [str(source / "slot.sav")])
+    (source / "slot.sav").write_bytes(b"local slot")
+    (source / "other.sav").write_bytes(b"local other")
+    with pytest.raises(ValueError, match="未选择"):
+        cloud.download_current(123, g)
+    assert (source / "slot.sav").read_bytes() == b"local slot"
+    assert (source / "other.sav").read_bytes() == b"local other"
+    assert e.settings(g)["paths"] == [str(source / "slot.sav")]
+    assert e.settings(g)["keys"] is None
+    assert {b["source"] for b in e.backups(g)} == {"cloud_download"}
+
+
+def test_direct_download_requires_matching_number_of_roots(setup, tmp_path):
+    e, g, source, client, cloud = setup
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "save.dat").write_bytes(b"second save")
+    e.configure(g, [str(source), str(second)], ["proton/first", "proton/second"], "auto")
+    cloud.upload(123, g)
+    e.configure(g, [str(source)])
+    (source / "slot.sav").write_bytes(b"local progress")
+    with pytest.raises(ValueError, match="数量"):
+        cloud.download_current(123, g)
+    assert (source / "slot.sav").read_bytes() == b"local progress"
+
+
+@pytest.mark.parametrize("change", ["revision", "quark_account", "steam_account", "running"])
+def test_direct_download_race_preserves_live_save_and_keeps_download(setup, monkeypatch, change):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    remote = cloud.latest(123, g)
+    (source / "slot.sav").write_bytes(b"local progress")
+    real_download = client.download
+    def download(fid, destination, limit=None):
+        real_download(fid, destination, limit)
+        if fid != remote["archive_fid"]:
+            return
+        if change == "revision":
+            index = client.items[remote["revision"]]
+            p = source.parent / "new-index.json"
+            p.write_bytes(client.payloads[remote["revision"]])
+            client.upload(p, index["parent"], index["file_name"])
+        elif change == "quark_account":
+            client.user_id = "new account"
+        elif change == "steam_account":
+            cloud.active_account = 456
+        else:
+            monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda _, **kwargs: {42})
+    monkeypatch.setattr(client, "download", download)
+    with pytest.raises(ValueError):
+        cloud.download_current(123, g)
+    assert (source / "slot.sav").read_bytes() == b"local progress"
+    assert {b["source"] for b in e.backups(g)} == {"cloud_download"}

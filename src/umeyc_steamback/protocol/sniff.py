@@ -37,12 +37,16 @@ class SaveSniffer:
         steam = Path(self.engine.get_steam_root()).resolve()
         # Scan Steam only through explicit game-specific roots, never via home.
         excluded = [data, steam, (self.home / "homebrew").resolve()]
+        if getattr(self.engine.config, "backup_root", None):
+            excluded.append(Path(self.engine.config.backup_root).resolve())
         def linked(path):
             try:
                 return path.is_symlink() or bool(getattr(path.lstat(), "st_file_attributes", 0) & 0x400)
             except OSError:
                 return True
         for root in roots:
+            if any(root.resolve() == x or x in root.resolve().parents for x in excluded if x != steam):
+                continue
             if linked(root) or not root.is_dir():
                 continue
             for directory, dirs, files in os.walk(root, followlinks=False):

@@ -14,7 +14,7 @@ import vdf
 
 from .desktop import app_command
 from .engine import read_json
-from .protocol.custom import write_json
+from .protocol.custom import safe_file, write_json
 
 
 def steam_is_running():
@@ -159,7 +159,7 @@ class LaunchOptions:
         backup.write_bytes(raw)
         # Persist recovery metadata before modifying Steam, including original bytes.
         intent = self.engine.data / "steam_launch_recovery.json"
-        write_json(intent, {"path": str(path), "backup": str(backup), "before": read_json(self.state_path), "after": state,
+        write_json(intent, {"path": str(path), "backup": str(backup.relative_to(self.engine.data)), "before": read_json(self.state_path), "after": state,
                             "output_sha256": hashlib.sha256(output).hexdigest()})
         fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".umeyc-")
         try:
@@ -181,7 +181,8 @@ class LaunchOptions:
         current = Path(saved["path"]).read_bytes()
         if hashlib.sha256(current).hexdigest() == saved["output_sha256"]:
             write_json(self.state_path, saved["after"])
-        elif current == Path(saved["backup"]).read_bytes():
+        elif current == safe_file(self.engine.data / "steam_config_backups",
+                                  saved["backup"].replace("\\", "/").rsplit("/", 1)[-1]).read_bytes():
             write_json(self.state_path, saved["before"])
         else:
             raise ValueError("存在未完成的 Steam 启动项修改，且配置已变化，请检查备份目录")

@@ -117,3 +117,32 @@ def test_manual_reconfiguration_after_moving_tool_retains_original_parameters(ma
     assert manager.installed(123, 42)
     assert manager.configured(123, 42)["original"] == original
     assert manager.preview(123, 42) == (original, moved)
+
+
+@pytest.mark.parametrize("legacy_absolute_path", [False, True])
+def test_pending_steam_configuration_recovers_after_portable_migration(manager, tmp_path, monkeypatch, legacy_absolute_path):
+    from umeyc_steamback.protocol.custom import write_json
+    from umeyc_steamback.storage import migrate_legacy
+    manager, path = manager
+    calls = []
+    def running():
+        calls.append(1)
+        return len(calls) > 1
+    monkeypatch.setattr("umeyc_steamback.launch_options.steam_is_running", running)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="取消修改"):
+        manager.update(123, 42)
+    old = manager.engine.data
+    if legacy_absolute_path:
+        intent = old / "steam_launch_recovery.json"
+        saved = read_json(intent)
+        saved["backup"] = str(old / saved["backup"])
+        write_json(intent, saved)
+    moved = tmp_path / "portable/data"
+    migrate_legacy(old, moved, tmp_path / "portable/backups")
+    engine = Engine(Config(str(moved), manager.engine.config.steam_dir))
+    new_manager = LaunchOptions(engine)
+    new_manager.recover()
+    assert not (moved / "steam_launch_recovery.json").exists()
+    assert not new_manager.configured(123, 42)
+    assert path.read_bytes() == before

@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import time
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
-from umeyc_steamback.app import Window, PathsDialog, MappingDialog
+from umeyc_steamback.app import Window, PathsDialog
 from umeyc_steamback.protocol.custom import write_json
 
 # Qt requires one QApplication for the entire process. Retain a strong
@@ -75,14 +75,12 @@ def test_window_worker_and_record_save_only_closes_record_dialog(tmp_path, monke
     window.close()
 
 
-def test_path_and_mapping_dialog_preserves_order(tmp_path):
+def test_path_dialog_preserves_order(tmp_path):
     app = QApplication.instance() or QApplication([])
     dialog = PathsDialog(["C:/Saves/A", "C:/Saves/B"], None)
     dialog.items.setCurrentRow(1)
     dialog.move(-1)
     assert dialog.paths() == ["C:/Saves/B", "C:/Saves/A"]
-    mapping = MappingDialog(["custom-0", "custom-1"], dialog.paths(), None)
-    assert mapping.paths() == dialog.paths()
 
 
 def test_unified_game_list_filters_compatibility_tools_and_launch_uses_normal_steam_entry(tmp_path, monkeypatch):
@@ -285,3 +283,74 @@ def test_reopening_existing_background_host_checks_updates_again(tmp_path, monke
     w.handle_command({'action': 'show'}, lambda reply: events.append(reply))
     assert events == ['show', 'check', {'ok': True}]
     w.close()
+
+
+def test_account_labels_show_nicknames_but_keep_separate_account_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.steam.accounts", lambda _: [
+        {"id": 123, "name": "玩家昵称"}, {"id": 456, "name": "另一个玩家"}])
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.load_accounts(456)
+    assert [w.account_box.itemText(i) for i in range(w.account_box.count())] == ["玩家昵称", "另一个玩家"]
+    assert w.account_box.currentData() == 456 and w.engine.account == 456
+    w.auth = {"logged_in": True, "nickname": "夸克昵称", "user_id": "private-id"}
+    w.update_auth()
+    assert w.login_button.text() == "夸克昵称"
+    w.auth["nickname"] = None
+    w.update_auth()
+    assert w.login_button.text() == "夸克用户"
+    w.load_accounts(789)
+    assert w.account_box.currentText() == "Steam 用户"
+    assert w.engine.account == 789
+
+
+def test_cloud_download_uses_configured_paths_without_dialog(tmp_path, monkeypatch):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data", backup_root=tmp_path / "backups")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.game = {"game_id": 42, "game_name": "测试"}
+    source = tmp_path / "saves"
+    source.mkdir()
+    w.engine.configure(w.game, [str(source)])
+    monkeypatch.setattr(QDialog, "exec", lambda _: pytest.fail("已配置路径不应弹窗"))
+    calls = []
+    monkeypatch.setattr(w, "task", lambda message, function, done: function())
+    monkeypatch.setattr(w.cloud, "download_current", lambda account, game: calls.append((account, game)))
+    w.download()
+    assert calls == [(123, w.game)]
+    assert w.engine.settings(w.game)["paths"] == [str(source)]
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_cloud_download_asks_for_actual_path_once_only_if_unconfigured(tmp_path, monkeypatch, accepted):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.game = {"game_id": 42, "game_name": "测试"}
+    source = tmp_path / "saves"
+    source.mkdir()
+    dialogs, calls = [], []
+    def select(dialog):
+        dialogs.append(dialog.windowTitle())
+        dialog.items.addItem(str(source))
+        return QDialog.Accepted if accepted else QDialog.Rejected
+    monkeypatch.setattr(PathsDialog, "exec", select)
+    monkeypatch.setattr(w, "task", lambda message, function, done: function())
+    monkeypatch.setattr(w.cloud, "download_current", lambda *args: calls.append(args))
+    w.download()
+    assert dialogs == ["选择游戏实际存档路径"]
+    assert bool(calls) == accepted
+    assert bool(w.engine.settings(w.game).get("paths")) == accepted
+
+
+def test_executable_icon_has_small_and_large_cloud_save_images():
+    from pathlib import Path
+    from PySide6.QtGui import QIcon
+    import umeyc_steamback.app as module
+    icon = QIcon(str(Path(module.__file__).parent / "assets/cloud-save.ico"))
+    assert not icon.isNull()
+    assert {16, 32, 48, 256} <= {size.width() for size in icon.availableSizes()}
+    assert not icon.pixmap(256, 256).isNull()

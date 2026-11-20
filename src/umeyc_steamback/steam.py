@@ -41,12 +41,12 @@ def accounts(root):
     for sid, entry in read_vdf(root / "config/loginusers.vdf").get("users", {}).items():
         if sid.isdigit() and 0 < int(sid) - STEAM_ID_BASE < 2**32:
             result.append({"id": int(sid) - STEAM_ID_BASE,
-                           "name": entry.get("PersonaName") or entry.get("AccountName") or sid,
+                           "name": entry.get("PersonaName") or "Steam 用户",
                            "recent": entry.get("MostRecent") == "1"})
     for path in sorted((root / "userdata").glob("*")):
         if path.is_dir() and path.name.isdigit() and 0 < int(path.name) < 2**32:
             if not any(a["id"] == int(path.name) for a in result):
-                result.append({"id": int(path.name), "name": path.name, "recent": False})
+                result.append({"id": int(path.name), "name": "Steam 用户", "recent": False})
     return sorted(result, key=lambda a: not a["recent"])
 
 

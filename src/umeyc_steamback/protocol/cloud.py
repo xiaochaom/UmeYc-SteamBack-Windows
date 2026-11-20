@@ -262,7 +262,7 @@ class CloudService:
             return None
         # Prefer server creation time to device clocks; filename breaks ties.
         entry = max(commits, key=lambda x: (int(x.get("created_at", 0)), x["file_name"]))
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir=self.engine.config.app_data_dir) as temp:
             p = Path(temp) / "commit.json"
             self.client.download(entry["fid"], p, limit=1024**2)
             record = json.loads(p.read_text(encoding="utf-8"))
@@ -383,7 +383,7 @@ class CloudService:
             engine = self.isolated_engine(account)
             if (account, game["game_id"]) in self.running:
                 raise ValueError("请先退出游戏再同步")
-            with tempfile.TemporaryDirectory() as temp:
+            with tempfile.TemporaryDirectory(dir=engine.config.app_data_dir) as temp:
                 archive = Path(temp) / "save.zip"
                 manifest = pack_current(engine, game, archive)
                 remote = self.latest(account, game)
@@ -483,7 +483,7 @@ class CloudService:
             info, files, _ = source_plan(engine, game)
             local_hash = None
             if any(files.values()):
-                with tempfile.TemporaryDirectory() as temp:
+                with tempfile.TemporaryDirectory(dir=engine.config.app_data_dir) as temp:
                     local_hash = pack_current(engine, game, Path(temp) / "local.zip")["content_hash"]
             previous = self.read_state().get(self.key(account, game), {}).get("synced_hash")
             if local_hash == remote["content_hash"]:

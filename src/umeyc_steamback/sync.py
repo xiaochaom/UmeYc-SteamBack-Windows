@@ -72,13 +72,27 @@ class WindowsCloud(CloudService):
                 raise ValueError("云端暂无存档，请先从另一台设备上传")
             if expected_revision and remote["revision"] != expected_revision:
                 raise ValueError("云端版本已变化，请刷新后重试")
-            with tempfile.TemporaryDirectory() as temp:
+            with tempfile.TemporaryDirectory(dir=self.engine.config.app_data_dir) as temp:
                 archive = Path(temp) / "save.zip"
                 self.client.download(remote["archive_fid"], archive)
                 if digest(archive) != remote["archive_hash"]:
                     raise ValueError("云存档压缩包校验失败")
                 manifest = unpack_verified(archive, Path(temp) / "files", game, account, remote["content_hash"])
             return {"manifest": manifest, "remote": remote, "uid": self.uid}
+
+    def download_current(self, account, game):
+        with self.lock:
+            self.isolated_engine(account).guard(game)
+            uid = self.client.account()["user_id"]
+            if self.uid is not None and uid != self.uid:
+                raise ValueError("夸克账号已变化，请刷新后重试")
+            self.uid = uid
+            if self.active_account not in (None, account):
+                raise ValueError("Steam 账号已变化，请刷新后重试")
+            remote = self.latest(account, game)
+            if not remote:
+                raise ValueError("云端暂无存档，请先从另一台设备上传")
+            return self.download(account, game, remote["revision"], uid)
 
     def download(self, account, game, revision, expected_uid):
         with self.lock:
@@ -97,17 +111,29 @@ class WindowsCloud(CloudService):
                     raise ValueError("云存档校验失败，未覆盖游戏存档")
                 staging = Path(temp) / "files"
                 manifest = unpack_verified(archive, staging, game, account, remote["content_hash"])
-                plan = engine._custom_plan(game)
-                if plan["portable_keys"] != manifest["root_keys"] or plan["portable_mode"] != manifest["mode"]:
-                    raise ValueError("请先配置与云端对应的目录映射")
-                # Keep a persistent cloud-download record even if applying later fails.
+                # Retain the download even if applying fails. The extracted
+                # temporary directory is never configured as a live save path.
                 folder = engine.backup_dir(game)
                 folder.mkdir(parents=True, exist_ok=True)
                 name = f"{int(time.time()*1000)}-{uuid.uuid4().hex}"
-                shutil.copy2(archive, folder / f"{name}.zip")
-                write_json(folder / f"{name}.json", {"id": name, "name": "", "source": "cloud_download",
-                           "time": int(time.time()*1000), "save_time": manifest["save_time"],
-                           "content_hash": manifest["content_hash"], "archive_hash": remote["archive_hash"]})
+                copy = folder / f"{name}.zip"
+                try:
+                    shutil.copy2(archive, copy)
+                    write_json(folder / f"{name}.json", {"id": name, "name": "", "source": "cloud_download",
+                               "time": int(time.time()*1000), "save_time": manifest["save_time"],
+                               "content_hash": manifest["content_hash"], "archive_hash": remote["archive_hash"]})
+                except BaseException:
+                    copy.unlink(missing_ok=True)
+                    raise
+                # Do not apply an obsolete download if another machine
+                # published while transferring, or the game restarted.
+                current = self.latest(account, game)
+                if not current or current["revision"] != revision:
+                    raise ValueError("云端版本已变化，下载已保留但未覆盖游戏存档，请重新同步")
+                if self.client.account()["user_id"] != expected_uid or self.active_account not in (None, account):
+                    raise ValueError("账号已变化，未覆盖游戏存档")
+                engine.guard(game)
+                engine.align_cloud_paths(game, manifest)
                 engine.apply(game, manifest, staging, "cloud_sync")
                 self.remember(account, game, manifest["content_hash"])
-            return {"message": "云端存档已同步到本地；下载记录及覆盖前备份已保留"}
+            return {"message": "云端存档已覆盖到游戏存档路径；下载记录及覆盖前备份已保留"}

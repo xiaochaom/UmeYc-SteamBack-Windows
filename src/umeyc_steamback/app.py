@@ -112,48 +112,13 @@ class PathsDialog(QDialog):
         return [self.items.item(i).text() for i in range(self.items.count())]
 
 
-class MappingDialog(QDialog):
-    def __init__(self, keys, initial, parent):
-        super().__init__(parent)
-        self.setWindowTitle("确认云端目录与 Windows 路径的对应关系")
-        self.resize(760, 400)
-        self.edits = []
-        layout = QVBoxLayout(self)
-        layout.addWidget(label("请为云端的每个目录选择对应的 Windows 存档文件夹。相对文件名保持不变。确认后才会覆盖；两端游戏版本与存档格式也需兼容。"))
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        content = QWidget()
-        form = QVBoxLayout(content)
-        for i, key in enumerate(keys):
-            form.addWidget(label(f"目录 {i+1}：{key}"))
-            row = QHBoxLayout()
-            edit = QLineEdit(initial[i] if i < len(initial) else "")
-            self.edits.append(edit)
-            row.addWidget(edit)
-            button("选择文件夹", lambda checked=False, e=edit: self.browse(e), row)
-            form.addLayout(row)
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
-        controls = QDialogButtonBox()
-        controls.addButton("确认目录，继续同步", QDialogButtonBox.AcceptRole).clicked.connect(self.accept)
-        controls.addButton("取消", QDialogButtonBox.RejectRole).clicked.connect(self.reject)
-        layout.addWidget(controls)
-
-    def browse(self, edit):
-        path = QFileDialog.getExistingDirectory(self, "选择此云端目录对应的 Windows 存档目录", edit.text())
-        if path:
-            edit.setText(path)
-
-    def paths(self):
-        return [e.text().strip() for e in self.edits]
-
-
 class Window(QMainWindow):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, backup_root=None):
         super().__init__()
         self.data = Path(data_dir)
         ui = read_json(self.data / "ui.json")
-        self.engine = Engine(Config(str(self.data), ui.get("steam", str(steam.steam_root()))))
+        self.engine = Engine(Config(str(self.data), ui.get("steam", str(steam.steam_root())),
+                                    backup_root=str(backup_root) if backup_root is not None else None))
         self.cloud = WindowsCloud(self.engine)
         self.sniffer = WindowsSniffer(self.engine)
         self.items = []
@@ -183,7 +148,7 @@ class Window(QMainWindow):
         self.update_pool.setMaxThreadCount(1)
         self.setWindowTitle(f"UmeYc-SteamBack-Windows  {__version__}")
         self.resize(1120, 810)
-        icon = Path(__file__).parent / "assets/cloud-save.svg"
+        icon = Path(__file__).parent / "assets/cloud-save.ico"
         self.setWindowIcon(QIcon(str(icon)))
         root = QWidget()
         self.setCentralWidget(root)
@@ -509,9 +474,9 @@ class Window(QMainWindow):
         self.account_box.clear()
         items = steam.accounts(Path(self.engine.get_steam_root()))
         if selected and not any(a["id"] == selected for a in items):
-            items.append({"id": selected, "name": str(selected)})
+            items.append({"id": selected, "name": "Steam 用户"})
         for a in items:
-            self.account_box.addItem(f"{a['name']} · {a['id']}", a["id"])
+            self.account_box.addItem(a["name"], a["id"])
         index = self.account_box.findData(selected)
         self.account_box.setCurrentIndex(max(0, index))
         self.account_box.blockSignals(False)
@@ -569,7 +534,7 @@ class Window(QMainWindow):
 
     def update_auth(self):
         a = self.auth
-        self.login_button.setText(f"{a.get('nickname') or '夸克用户'} · {a.get('user_id')}" if a.get("logged_in") else "登录夸克")
+        self.login_button.setText((a.get("nickname") or "夸克用户") if a.get("logged_in") else "登录夸克")
         self.login_button.setToolTip(a.get("error", "扫码登录夸克"))
 
     def filter_games(self):
@@ -620,7 +585,13 @@ class Window(QMainWindow):
             f"{i+1}. {p}" + (f"\n    ↔ {keys[i]}" if keys and i < len(keys) else "") for i, p in enumerate(paths)) or "尚未选择；可识别候选、手动选择或嗅探"))
         if not self.engine.account_ids:
             return
-        self.backup_path.setText(f"备份保存路径：{self.engine.backup_dir(game)}")
+        try:
+            self.backup_path.setText(f"备份保存路径：{self.engine.backup_dir(game)}")
+            records = self.engine.backups(game)
+        except (OSError, ValueError) as error:
+            self.records.setRowCount(0)
+            self.error(error)
+            return
         self.render_times()
         account = self.engine.account
         selected_game = dict(game)
@@ -633,7 +604,6 @@ class Window(QMainWindow):
                 self.task("", lambda: self.cloud.isolated_engine(account).save_time(selected_game), update_local, quiet=True)
         QTimer.singleShot(0, read_local)
         self.auto_sync.setChecked(self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_sync", False))
-        records = self.engine.backups(game)
         self.records.setRowCount(len(records))
         sources = {"manual": "手动备份", "cloud_download": "云端下载", "before_cloud_sync": "同步前本地备份", "before_restore": "恢复前本地备份"}
         for i, record in enumerate(records):
@@ -856,19 +826,19 @@ class Window(QMainWindow):
         if not self.require_game():
             return
         game, account = dict(self.game), self.engine.account
-        self.task("正在校验云端存档并读取目录映射…", lambda: self.cloud.inspect(account, game),
-                  lambda inspected: self.confirm_download(game, account, inspected))
-
-    def confirm_download(self, game, account, inspected):
-        manifest, remote = inspected["manifest"], inspected["remote"]
-        settings = self.engine.settings(game)
-        dialog = MappingDialog(manifest["root_keys"], settings.get("paths", []), self)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        if not self.confirm(f"云端存档时间：{date(remote['save_time'])}\n将覆盖所选 Windows 目录中的对应文件；覆盖前保存本地备份。确定继续？"):
-            return
-        self.engine.configure(game, dialog.paths(), manifest["root_keys"], manifest["mode"])
-        self.task("正在同步到本地并保存覆盖前备份…", lambda: self.cloud.download(account, game, remote["revision"], inspected["uid"]), self.synced)
+        if not self.engine.settings(game).get("paths"):
+            dialog = PathsDialog([], self)
+            dialog.setWindowTitle("选择游戏实际存档路径")
+            if dialog.exec() != QDialog.Accepted:
+                return
+            try:
+                self.engine.configure(game, dialog.paths())
+            except (ValueError, OSError) as error:
+                return self.error(error)
+        # The user chose cloud -> local. Reuse the actual game paths and stage
+        # the archive privately; no second per-directory mapping dialog.
+        self.task("正在下载并覆盖游戏存档，覆盖前保存本地备份…",
+                  lambda: self.cloud.download_current(account, game), self.synced)
 
     def backup(self):
         if self.require_game():
@@ -1052,19 +1022,29 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("UmeYc-SteamBack-Windows")
     app.setOrganizationName("xiaochaom")
+    app.setWindowIcon(QIcon(str(Path(__file__).parent / "assets/cloud-save.ico")))
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("xiaochaom.UmeYc.SteamBack.Windows")
     smoke_temp = None
     if "--smoke-test" in sys.argv:
         import tempfile
         smoke_temp = tempfile.TemporaryDirectory()
         data = Path(smoke_temp.name) / "data"
         write_json(data / "ui.json", {"steam": str(Path(smoke_temp.name) / "Steam")})
-    elif os.name == "nt":
-        data = Path(os.environ["LOCALAPPDATA"]) / "UmeYc-SteamBack-Windows"
     else:
-        data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "UmeYc-SteamBack-Windows"
-    data.mkdir(parents=True, exist_ok=True)
+        from .storage import data_directory
+        data = data_directory()
+    try:
+        data.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        QMessageBox.critical(None, "无法保存数据", "程序目录不可写，请将完整程序文件夹移动到可写位置后重试。")
+        return 1
     lock = QLockFile(str(data / ".application.lock"))
     if not lock.tryLock(100):
+        if lock.error() == QLockFile.PermissionError:
+            QMessageBox.critical(None, "无法保存数据", "程序目录不可写，请将完整程序文件夹移动到可写位置后重试。")
+            return 1
         if "--background" not in sys.argv:
             try:
                 result = request(server_name(data), {"action": "show"})
@@ -1074,7 +1054,17 @@ def main():
                 pass
         return
     app.setStyle("Fusion")
-    window = Window(data)
+    from .desktop import app_directory
+    backup_root = Path(smoke_temp.name) / "backups" if smoke_temp else app_directory() / "backups"
+    if not smoke_temp:
+        from .storage import initialize_storage
+        try:
+            initialize_storage(data, backup_root)
+        except (ValueError, OSError) as error:
+            QMessageBox.critical(None, "数据迁移未完成", f"{error}\n请确认程序目录可写且空间充足；工具未加载旧配置。")
+            lock.unlock()
+            return 1
+    window = Window(data, backup_root=backup_root)
     window.session_host = "--session-host" in sys.argv
     if not smoke_temp:
         QTimer.singleShot(0, window.check_for_updates)

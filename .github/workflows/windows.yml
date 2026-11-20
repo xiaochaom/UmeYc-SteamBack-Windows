@@ -30,6 +30,7 @@ jobs:
         run: >-
           python -m PyInstaller --noconfirm --clean --windowed --onedir
           --name UmeYc-SteamBack-Windows
+          --icon src/umeyc_steamback/assets/cloud-save.ico
           --collect-data umeyc_steamback
           --copy-metadata PySide6-Essentials --copy-metadata qrcode
           --copy-metadata vdf --copy-metadata psutil

@@ -9,6 +9,7 @@ import time
 import uuid
 
 from . import steam
+from .backup_storage import migrate_backups
 from .protocol.cloud import pack_current, unpack_verified, digest
 from .protocol.custom import safe_file, write_json
 from .protocol.sniff import SaveSniffer
@@ -19,6 +20,7 @@ class Config:
     app_data_dir: str
     steam_dir: str
     prelaunch_game_id: int | None = None
+    backup_root: str | None = None
 
 
 def read_json(path, default=None):
@@ -39,6 +41,16 @@ class Engine:
         self.account_ids = set()
         self.data = Path(config.app_data_dir)
         self.data.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def backup_root(self):
+        return Path(self.config.backup_root) if self.config.backup_root else self.data / "backups"
+
+    def validate_save_location(self, path):
+        path = Path(path).resolve()
+        for reserved in (self.data.resolve(), self.backup_root.resolve()):
+            if path == reserved or path in reserved.parents or reserved in path.parents:
+                raise ValueError("存档目录与应用备份目录不能相互包含")
 
     @property
     def account(self):
@@ -75,9 +87,7 @@ class Engine:
             path = path.resolve()
             if path == Path(path.anchor) or path == Path.home().resolve():
                 raise ValueError("请选择具体游戏的存档目录")
-            data = self.data.resolve()
-            if path == data or path in data.parents or data in path.parents:
-                raise ValueError("存档目录与应用备份目录不能相互包含")
+            self.validate_save_location(path)
             normalized.append(str(path))
         if not normalized:
             raise ValueError("请至少选择一个存档文件或目录")
@@ -85,15 +95,35 @@ class Engine:
             raise ValueError("不能重复选择同一目录")
         if any(Path(a) in Path(b).parents for a in normalized for b in normalized if a != b):
             raise ValueError("所选存档目录不能相互包含")
-        # Folder mappings preserve the remote slot order exactly.
+        # Several explicitly selected files may share one cloud slot. Keep
+        # their file scope: downloading must not turn it into folder access.
+        roots = list(dict.fromkeys(str(Path(p).parent if Path(p).is_file() else Path(p)) for p in normalized))
         if keys is not None:
-            if len(keys) != len(normalized) or not keys or len(keys) > 100 or not all(isinstance(k, str) for k in keys):
-                raise ValueError("云端目录映射不完整")
-            if not all(Path(p).is_dir() for p in normalized):
-                raise ValueError("云端目录映射需要选择文件夹")
+            if len(keys) != len(roots) or not keys or len(keys) > 100 or not all(isinstance(k, str) for k in keys):
+                raise ValueError("所选存档路径数量与云端不一致，请重新选择游戏实际存档路径")
         state = read_json(self.data / "games.json")
         state[self.key(game)] = {"game": game, "paths": normalized, "keys": keys, "mode": mode}
         write_json(self.data / "games.json", state)
+
+    def align_cloud_paths(self, game, manifest):
+        """Bind previously chosen paths to cloud slots without changing scope."""
+        plan = self._custom_plan(game)
+        if plan["portable_keys"] == manifest["root_keys"] and plan["portable_mode"] == manifest["mode"]:
+            return
+        settings = self.settings(game)
+        if settings.get("keys") is not None:
+            raise ValueError("云端目录映射已变化，请重新选择游戏实际存档路径")
+        if len(plan["save_games_roots"]) != len(manifest["root_keys"]):
+            raise ValueError("所选存档路径数量与云端不一致，请重新选择游戏实际存档路径")
+        roots = list(plan["save_games_roots"])
+        selected = [Path(p) for p in settings["paths"]]
+        # Check every cloud file against the existing user selection before
+        # changing metadata or touching any live file.
+        for entry in manifest["files"]:
+            target = safe_file(roots[entry["slot"]], entry["path"])
+            if not any(target == p or (p.is_dir() and p in target.parents) for p in selected):
+                raise ValueError("云端包含未选择的存档文件，请重新选择游戏实际存档路径")
+        self.configure(game, settings["paths"], manifest["root_keys"], manifest["mode"])
 
     def _custom_plan(self, game):
         settings = self.settings(game)
@@ -102,6 +132,7 @@ class Engine:
         grouped = {}
         for value in settings["paths"]:
             path = Path(value)
+            self.validate_save_location(path)
             if not path.exists() or linked(path):
                 raise ValueError(f"存档路径不可用：{path}")
             root = path.parent if path.is_file() else path
@@ -151,7 +182,13 @@ class Engine:
             raise ValueError("游戏正在运行，请退出游戏后操作存档")
 
     def backup_dir(self, game):
-        return self.data / "backups" / str(self.account) / str(int(game["game_id"]))
+        relative = Path(str(self.account)) / str(int(game["game_id"]))
+        folder = self.backup_root / relative
+        try:
+            migrate_backups(self.data / "backups" / relative, folder)
+        except OSError as error:
+            raise OSError(f"无法将备份迁移到程序目录，请确认目录可写且空间充足。原备份已保留：{folder}") from error
+        return folder
 
     def backup(self, game, source="manual", allow_empty=False):
         self.guard(game)
@@ -281,6 +318,8 @@ class Engine:
             raise ValueError("本地备份校验失败，未覆盖游戏存档")
         with tempfile.TemporaryDirectory(dir=self.data) as temp:
             manifest = unpack_verified(archive, temp, game, self.account, record["content_hash"])
+            if record.get("source") == "cloud_download":
+                self.align_cloud_paths(game, manifest)
             self.apply(game, manifest, temp, "restore", record.get("remove_on_restore", []))
 
 

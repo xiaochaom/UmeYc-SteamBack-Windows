@@ -1,16 +1,10 @@
 """Steam 启动包装器仅用 QCoreApplication，无主窗口。"""
 import argparse
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
-
-
-def data_directory():
-    if os.name == "nt":
-        return Path(os.environ["LOCALAPPDATA"]) / "UmeYc-SteamBack-Windows"
-    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "UmeYc-SteamBack-Windows"
+from .storage import data_directory
 
 
 def parse_args(argv):

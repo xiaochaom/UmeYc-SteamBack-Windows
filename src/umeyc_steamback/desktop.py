@@ -4,6 +4,14 @@ from pathlib import Path
 import subprocess
 import sys
 
+
+def app_directory():
+    """Portable data belongs beside the EXE, never in PyInstaller's temp tree."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
 def app_command(*args):
     if getattr(sys, "frozen", False):
         return [sys.executable, *args]

@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+/backups/
+/data/
 *.spec
 .DS_Store
 *.cookies
