@@ -100,3 +100,20 @@ def test_configuration_race_cancels_without_overwriting(manager, monkeypatch):
     assert path.read_bytes() == before
     manager.recover()
     assert not manager.configured(123, 42)
+
+
+def test_manual_reconfiguration_after_moving_tool_retains_original_parameters(manager, monkeypatch):
+    manager, path = manager
+    original, installed = manager.preview(123, 42)
+    manager.update(123, 42)
+    monkeypatch.setattr(manager, "prefix", lambda *_: '"D:/New Place/tool.exe" --steam-launch -- ')
+    _, moved = manager.preview(123, 42)
+    manager.remember_preview(123, 42, moved)
+    # Simulate the user pasting into Steam and Steam persisting the new value.
+    _, _, tree, node, field, *_ = manager.read(123, 42)
+    del node[field]
+    node[field] = moved
+    path.write_text(vdf.dumps(tree), encoding="utf-8")
+    assert manager.installed(123, 42)
+    assert manager.configured(123, 42)["original"] == original
+    assert manager.preview(123, 42) == (original, moved)

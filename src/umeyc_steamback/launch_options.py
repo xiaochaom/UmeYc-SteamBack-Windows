@@ -104,6 +104,10 @@ class LaunchOptions:
         state = read_json(self.state_path)
         previous = state.get(key)
         if previous and original == previous["installed"]:
+            # Reconfiguring after moving the tool updates only our prefix,
+            # retaining the parameters from before the first installation.
+            previous["installed"] = installed
+            write_json(self.state_path, state)
             return
         state[key] = {"original": original, "installed": installed, "existed": existed}
         write_json(self.state_path, state)
