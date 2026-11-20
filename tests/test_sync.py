@@ -178,6 +178,43 @@ def test_running_game_blocks_restore_backup_upload_and_publish(setup, monkeypatc
             operation()
 
 
+def test_manual_upload_refreshes_stale_running_cache_for_only_this_game(setup):
+    e, g, source, client, cloud = setup
+    cloud.running = {(123, 42), (123, 43), (456, 42)}
+    snapshot = cloud.manual_snapshot(123, g)
+    result = cloud.manual_transfer(123, g, "upload", snapshot)
+    assert "上传" in result["message"]
+    assert result["remote"]["content_hash"] == snapshot["local_hash"]
+    assert cloud.running == {(123, 43), (456, 42)}
+
+
+def test_live_game_still_blocks_upload_even_without_cached_state(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    assert not cloud.running
+    monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda *args, **kwargs: {42})
+    with pytest.raises(ValueError, match="正在运行"):
+        cloud.upload(123, g)
+    assert not client.items
+
+
+def test_game_restarting_during_upload_prevents_publication_after_cache_refresh(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    remote = cloud.latest(123, g)
+    (source / "slot.sav").write_bytes(b"new progress")
+    cloud.running.add((123, 42))
+    upload = client.upload
+    def start_game_after_archive(*args):
+        result = upload(*args)
+        if str(args[2]).endswith(".zip"):
+            monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda *args, **kwargs: {42})
+        return result
+    monkeypatch.setattr(client, "upload", start_game_after_archive)
+    with pytest.raises(ValueError, match="正在运行"):
+        cloud.upload(123, g)
+    assert cloud.latest(123, g)["revision"] == remote["revision"]
+
+
 def test_restore_failure_rolls_back_all_written_files(setup, monkeypatch):
     e, g, source, client, cloud = setup
     (source / "z.sav").write_bytes(b"cloud z")

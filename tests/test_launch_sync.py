@@ -122,6 +122,13 @@ def test_prelaunch_ignores_only_steam_wrapper_registry_and_restores_guard(setup,
         e.guard(g)
 
 
+def test_prelaunch_does_not_restore_a_stale_running_cache(setup):
+    e, g, source, client, cloud = setup
+    cloud.running = {(123, 42), (123, 43)}
+    cloud.prepare_steam_launch(123, g)
+    assert cloud.running == {(123, 43)}
+
+
 def test_exit_upload_waits_for_stable_files_and_checks_account(setup):
     e, g, source, client, cloud = setup
     sleeps = []

@@ -58,16 +58,13 @@ class WindowsCloud(CloudService):
         with self.lock:
             check_steam_account(account)
             aid = game["game_id"]
-            was_running = (account, aid) in self.running
-            self.running.discard((account, aid))
             self.hook_game_id = aid
             try:
                 self.isolated_engine(account).guard(game)
+                self.running.discard((account, aid))
                 return self._prepare_launch(account, aid)
             finally:
                 self.hook_game_id = None
-                if was_running:
-                    self.running.add((account, aid))
 
     def upload_after_exit(self, account, game, uid, wait=None, base_hash=CURRENT_BASELINE):
         from .desktop import check_steam_account
@@ -98,6 +95,10 @@ class WindowsCloud(CloudService):
     def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE, confirmed_source=None):
         with self.lock:
             self.isolated_engine(account).guard(game)
+            # The process/Steam check just succeeded. An earlier monitor tick
+            # must not override it with a stale running flag. The base upload
+            # still checks again before publishing the new cloud version.
+            self.running.discard((account, game["game_id"]))
             result = super().upload(account, game, expected_revision, expected_uid,
                                     base_hash=base_hash, confirmed_source=confirmed_source)
             return {**result, "uid": self.uid, "account": account, "game_id": int(game["game_id"])}
