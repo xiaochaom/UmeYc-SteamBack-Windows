@@ -133,11 +133,14 @@ def check_data(target, data):
     assert (target / "custom.txt").read_bytes() == b"unrelated-file"
 
 
-def test_apply_waits_exits_replaces_whole_runtime_and_preserves_data(staged):
+def test_apply_waits_exits_replaces_whole_runtime_and_preserves_data(staged, monkeypatch):
     target, data, prepared, plan, waited = staged
     restarted = []
+    refreshed = []
+    monkeypatch.setattr("umeyc_steamback.desktop.refresh_executable_icon", lambda exe: refreshed.append(exe))
     def restart(exe):
         assert not u.update_in_progress(data)
+        assert refreshed == [target / u.EXE]
         restarted.append(exe)
     assert u.apply_update(plan, restart=restart)
     assert waited and restarted == [target / u.EXE]

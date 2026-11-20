@@ -299,6 +299,9 @@ def apply_update(plan_path, executable=None, restart=None):
             success = False
         else:
             write_json(data / "updates/result.json", {"ok": True, "version": plan["version"]})
+    # The path stays the same across updates, so Explorer may retain its old icon.
+    from .desktop import refresh_executable_icon
+    refresh_executable_icon(target / EXE)
     # Release the install lock before the new/rolled-back app starts.
     try:
         process = restart(target / EXE)
@@ -308,6 +311,7 @@ def apply_update(plan_path, executable=None, restart=None):
         with install_lock(data):
             restore_old()
             write_json(data / "updates/result.json", {"ok": False, "version": plan["version"]})
+        refresh_executable_icon(target / EXE)
         process = restart(target / EXE)
         success = False
     if process is not None:

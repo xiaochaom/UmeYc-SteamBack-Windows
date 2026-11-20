@@ -1213,6 +1213,9 @@ def main():
         result_file.unlink(missing_ok=True)
         if result and not result.get("ok"):
             QTimer.singleShot(0, lambda: window.error(ValueError("更新未完成，已恢复旧版程序；配置和备份未修改，请重试更新。")))
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            from .desktop import refresh_icon_once
+            QTimer.singleShot(0, lambda: refresh_icon_once(data, sys.executable, __version__))
         QTimer.singleShot(5000, lambda: cleanup_updates(data))
         QTimer.singleShot(0, window.check_for_updates)
         try:
