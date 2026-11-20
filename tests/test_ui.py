@@ -2,6 +2,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import time
+import pytest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 from umeyc_steamback.app import Window, PathsDialog, MappingDialog
 from umeyc_steamback.protocol.custom import write_json
@@ -9,6 +10,25 @@ from umeyc_steamback.protocol.custom import write_json
 # Qt requires one QApplication for the entire process. Retain a strong
 # reference so individual test scopes cannot destroy it between windows.
 _APPLICATION = QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def cleanup_qt_windows():
+    yield
+    from PySide6.QtCore import QCoreApplication, QEvent, QThreadPool
+    # Keep Qt workers, queued signals and widget destruction inside the test
+    # event loop instead of leaving QObjects to Python interpreter teardown.
+    assert QThreadPool.globalInstance().waitForDone(5000)
+    _APPLICATION.processEvents()
+    for widget in _APPLICATION.topLevelWidgets():
+        if isinstance(widget, Window):
+            widget.monitor.stop()
+            widget.command_timer.stop()
+            widget.quitting = True
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    _APPLICATION.processEvents()
 
 
 def drain(app, window, timeout=5):
@@ -65,8 +85,7 @@ def test_path_and_mapping_dialog_preserves_order(tmp_path):
     assert mapping.paths() == dialog.paths()
 
 
-def test_game_groups_and_launch_waits_for_cloud_sync(tmp_path, monkeypatch):
-    import threading
+def test_game_groups_and_launch_uses_normal_steam_entry(tmp_path, monkeypatch):
     from PySide6.QtGui import QDesktopServices
     app = QApplication.instance() or QApplication([])
     write_json(tmp_path / "data/ui.json", {"steam": str(tmp_path / "Steam"), "account": 123})
@@ -81,16 +100,85 @@ def test_game_groups_and_launch_waits_for_cloud_sync(tmp_path, monkeypatch):
     assert w.games_list.item(1).data(256)["game_id"] == 43
     assert w.games_list.item(2).text().startswith("支持 Steam 云存档")
     drain(app, w)
-    opened, event = [], threading.Event()
+    opened = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
-    def prepare(account, game):
-        assert event.wait(3)
-        return {"message": "已同步", "synced": True}
-    monkeypatch.setattr(w.cloud, "prepare_game_launch", prepare)
+    monkeypatch.setattr(w.cloud, "prepare_game_launch", lambda *_: (_ for _ in ()).throw(AssertionError("Steam wrapper owns preflight")))
     w.launch_game()
     app.processEvents()
-    assert not opened
-    event.set()
-    drain(app, w)
     assert opened == ["steam://rungameid/43"]
+    drain(app, w)
+    w.close()
+
+
+def test_hidden_window_skips_page_render_and_session_host_exits_only_when_idle(tmp_path, monkeypatch):
+    app = _APPLICATION
+    monkeypatch.setattr("umeyc_steamback.app.Window.refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.hide_window()
+    monkeypatch.setattr(w.engine, "backups", lambda _: (_ for _ in ()).throw(AssertionError("hidden page should not refresh")))
+    w.render_game()
+    assert w.page_dirty and not w.centralWidget().updatesEnabled()
+    assert w.monitor.interval() == 5000
+    w.session_host = True
+    w.last_session_work = time.monotonic() - 60
+    quit_called = []
+    monkeypatch.setattr(w, "quit_app", lambda: quit_called.append(1))
+    w.sessions[(123, 42)] = 1
+    w.maybe_exit_session()
+    assert not quit_called
+    w.sessions.clear()
+    w.cloud.running = {(123, 42)}
+    w.maybe_exit_session()
+    assert not quit_called
+    w.cloud.running.clear()
+    w.upload_queue.pending["test"] = {}
+    w.maybe_exit_session()
+    assert not quit_called
+    w.upload_queue.pending.clear()
+    w.maybe_exit_session()
+    assert quit_called == [1]
+    w.close()
+
+
+def test_ipc_sync_is_acknowledged_only_after_background_result(tmp_path):
+    import subprocess
+    import sys
+    from umeyc_steamback.ipc import CommandServer, server_name
+    app = _APPLICATION
+    server = CommandServer(server_name(tmp_path))
+    received = []
+    server.command.connect(lambda command, reply: received.append((command, reply)))
+    # The production client is a separate process. A Python thread using Qt's
+    # blocking socket wait can hold the GIL and starve the server event loop.
+    code = "from PySide6.QtCore import QCoreApplication; from umeyc_steamback.ipc import request; import sys,json; app=QCoreApplication([]); print(json.dumps(request(sys.argv[1], {'action':'prepare','account':123,'game_id':42}, 5000)))"
+    client = subprocess.Popen([sys.executable, "-c", code, server_name(tmp_path)],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        until = time.monotonic() + 4
+        while not received and time.monotonic() < until:
+            app.processEvents()
+            time.sleep(.01)
+        assert received and client.poll() is None
+        received[0][1]({"ok": True})
+        while client.poll() is None and time.monotonic() < until:
+            app.processEvents()
+            time.sleep(.01)
+        output, error = client.communicate(timeout=2)
+        assert client.returncode == 0, error
+        assert output.strip() == '{"ok": true}'
+    finally:
+        if client.poll() is None:
+            client.kill()
+            client.wait()
+    server.server.close()
+
+
+def test_game_page_has_additive_launch_configuration_without_restore_action(tmp_path, monkeypatch):
+    monkeypatch.setattr("umeyc_steamback.app.Window.refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    texts = [b.text() for b in w.findChildren(QPushButton)]
+    assert "配置 Steam 启动项" in texts
+    assert not any("恢复原启动项" in t or "复制原启动项" in t for t in texts)
     w.close()

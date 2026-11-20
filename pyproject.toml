@@ -15,7 +15,7 @@ dependencies = ["PySide6-Essentials>=6.7,<7", "qrcode>=7.4,<9", "vdf>=3.4,<4", "
 dev = ["pytest>=8,<10", "pyinstaller>=6.10,<7"]
 
 [project.gui-scripts]
-umeyc-steamback = "umeyc_steamback.app:main"
+umeyc-steamback = "umeyc_steamback.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

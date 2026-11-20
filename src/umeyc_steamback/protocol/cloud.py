@@ -191,6 +191,16 @@ class CloudService:
         self.status_cache = {}
         self.job_gate = asyncio.Lock()
         self.active_account = None
+        if self.state_path.exists():
+            saved = self.read_state()
+            changed = False
+            for entry in saved.values():
+                if "auto_sync" not in entry and ("auto_upload" in entry or "auto_download" in entry):
+                    enabled = bool(entry.get("auto_upload") and entry.get("auto_download"))
+                    entry.update(auto_sync=enabled, auto_upload=enabled, auto_download=enabled)
+                    changed = True
+            if changed:
+                write_json(self.state_path, saved)
 
     def isolated_engine(self, account):
         if type(account) is not int or not 0 < account < 2**32:
@@ -401,6 +411,20 @@ class CloudService:
                 warning = self._prune_versions(account, game, folder, before, record)
                 return {"message": warning or "本地存档已上传，云端仅保留最新一份"}
 
+
+    def set_auto_sync(self, account, game, enabled):
+        with self.lock:
+            self.isolated_engine(account)
+            if type(enabled) is not bool:
+                raise ValueError("无效的自动云同步开关")
+            if not self.account_status()["logged_in"]:
+                raise ValueError("请先登录夸克")
+            state = self.read_state()
+            state.setdefault(self.key(account, game), {}).update(
+                auto_sync=enabled, auto_download=enabled, auto_upload=enabled,
+                game={k: game[k] for k in ("game_id", "game_name", "install_root")})
+            write_json(self.state_path, state)
+            return enabled
 
     def set_auto_download(self, account, game, enabled):
         with self.lock:

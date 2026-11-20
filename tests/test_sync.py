@@ -18,7 +18,7 @@ from tests.fake_quark import MemoryQuark
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
-    monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda _: set())
+    monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda _, **kwargs: set())
     source = tmp_path / "游戏存档"
     source.mkdir()
     (source / "slot.sav").write_bytes(b"chapter one")

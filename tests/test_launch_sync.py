@@ -92,3 +92,48 @@ def test_account_change_prevents_enabled_launch(setup):
     cloud.active_account = 124
     with pytest.raises(ValueError, match="账号已变化"):
         cloud.prepare_game_launch(123, g)
+
+
+def test_unified_toggle_enables_both_and_migrates_partial_legacy_settings_off(setup):
+    e, g, source, client, cloud = setup
+    cloud.set_auto_sync(123, g, True)
+    saved = cloud.read_state()[cloud.key(123, g)]
+    assert saved["auto_download"] and saved["auto_upload"] and saved["auto_sync"]
+    cloud.set_auto_sync(123, g, False)
+    assert not any(cloud.read_state()[cloud.key(123, g)][f] for f in ("auto_download", "auto_upload", "auto_sync"))
+    write_json(cloud.state_path, {cloud.key(123, g): {"auto_upload": True, "game": g}})
+    from umeyc_steamback.sync import WindowsCloud
+    replacement = WindowsCloud(e, client)
+    assert not replacement.read_state()[replacement.key(123, g)]["auto_sync"]
+    assert not replacement.read_state()[replacement.key(123, g)]["auto_upload"]
+
+
+def test_prelaunch_ignores_only_steam_wrapper_registry_and_restores_guard(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    calls = []
+    def running(items, ignore_registry_for=None):
+        calls.append(ignore_registry_for)
+        return set() if ignore_registry_for == 42 else {42}
+    monkeypatch.setattr("umeyc_steamback.steam.running_games", running)
+    assert cloud.prepare_steam_launch(123, g)
+    assert calls == [42]
+    assert cloud.hook_game_id is None
+    with pytest.raises(ValueError, match="正在运行"):
+        e.guard(g)
+
+
+def test_exit_upload_waits_for_stable_files_and_checks_account(setup):
+    e, g, source, client, cloud = setup
+    sleeps = []
+    result = cloud.upload_after_exit(123, g, client.user_id, wait=sleeps.append)
+    assert sleeps == [2]
+    assert "上传" in result["message"]
+
+
+def test_disabled_hook_runs_without_cloud_access_and_preserves_both_flags_off(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    cloud.set_auto_sync(123, g, True)
+    cloud.set_auto_sync(123, g, False)
+    monkeypatch.setattr(client, "account", lambda: pytest.fail("disabled hook must not access cloud"))
+    assert cloud.prepare_steam_launch(123, g)["synced"] is False
+    assert not cloud.read_state()[cloud.key(123, g)]["auto_upload"]

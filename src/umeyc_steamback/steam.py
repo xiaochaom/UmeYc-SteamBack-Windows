@@ -73,11 +73,13 @@ def game_directory(game):
     return Path(game["install_root"]) / "steamapps/common" / game.get("install_dir", "")
 
 
-def running_games(items):
+def running_games(items, ignore_registry_for=None):
     running = set()
     if os.name == "nt":
         import winreg
         for g in items:
+            if g["game_id"] == ignore_registry_for:
+                continue
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Valve\Steam\Apps\{g['game_id']}") as key:
                     if winreg.QueryValueEx(key, "Running")[0]:

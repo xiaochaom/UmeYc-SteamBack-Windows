@@ -18,6 +18,7 @@ from .protocol.sniff import SaveSniffer
 class Config:
     app_data_dir: str
     steam_dir: str
+    prelaunch_game_id: int | None = None
 
 
 def read_json(path, default=None):
@@ -139,7 +140,14 @@ class Engine:
             return None
 
     def guard(self, game):
-        if game["game_id"] in steam.running_games([game]):
+        if self.config.prelaunch_game_id is not None and not game.get("install_dir"):
+            manifest = Path(game["install_root"]) / "steamapps" / f"appmanifest_{game['game_id']}.acf"
+            install = steam.read_vdf(manifest).get("AppState", {}).get("installdir")
+            if not install:
+                raise ValueError("无法确认游戏安装目录，请刷新 Steam 游戏列表后重试")
+            game = {**game, "install_dir": install}
+        if game["game_id"] in steam.running_games([game], **(
+                {"ignore_registry_for": self.config.prelaunch_game_id} if self.config.prelaunch_game_id is not None else {})):
             raise ValueError("游戏正在运行，请退出游戏后操作存档")
 
     def backup_dir(self, game):

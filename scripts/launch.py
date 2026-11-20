@@ -1,4 +1,4 @@
-from umeyc_steamback.app import main
+from umeyc_steamback.cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

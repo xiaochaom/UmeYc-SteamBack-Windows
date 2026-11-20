@@ -6,13 +6,13 @@ import time
 
 import qrcode
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Qt, QLockFile, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QImage, QPainter, QPixmap, QIcon
+from PySide6.QtGui import QDesktopServices, QPainter, QPixmap, QIcon, QAction
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
+    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QSystemTrayIcon, QMenu, QPlainTextEdit,
 )
 
 from . import __version__, steam
@@ -21,6 +21,10 @@ from .protocol.cloud import CloudConflict, pack_current
 from .protocol.custom import write_json
 from .sync import WindowsCloud
 from .appinfo import cloud_support
+from . import desktop
+from .background import UploadQueue
+from .launch_options import LaunchOptions
+from .ipc import CommandServer, request, server_name
 
 
 def date(value):
@@ -160,6 +164,17 @@ class Window(QMainWindow):
         self.auth = {}
         self.last_running = None
         self.pending_auto = []
+        self.upload_queue = UploadQueue(self.data)
+        self.launch_options = LaunchOptions(self.engine)
+        self.launch_requests = []
+        self.background_mode = False
+        self.page_dirty = False
+        self.quitting = False
+        self.server = None
+        self.tray = None
+        self.session_host = False
+        self.sessions = {}
+        self.last_session_work = time.monotonic()
         self.local_times = {}
         self.setWindowTitle(f"UmeYc-SteamBack-Windows  {__version__}")
         self.resize(1120, 810)
@@ -181,6 +196,10 @@ class Window(QMainWindow):
         self.login_button = button("登录夸克", self.login, header)
         button("退出夸克", self.logout, header)
         layout.addWidget(self.header)
+        settings_row = QHBoxLayout()
+        settings_row.addWidget(label("Steam 启动时按需唤起；上传完成后自动退出，无需开机自启。"))
+        button("后台记录", self.show_activity, settings_row)
+        layout.addLayout(settings_row)
         self.splitter = QSplitter()
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -210,6 +229,9 @@ class Window(QMainWindow):
         button("开始嗅探存档位置", self.begin_sniff, sniff_actions)
         button("游戏保存并退出后，完成嗅探", self.finish_sniff, sniff_actions)
         page.addLayout(sniff_actions)
+        launch_options_row = QHBoxLayout()
+        button("配置 Steam 启动项", self.configure_launch_options, launch_options_row)
+        page.addLayout(launch_options_row)
         self.launch_button = QPushButton("开始游戏")
         self.launch_button.clicked.connect(self.launch_game)
         page.addWidget(self.launch_button)
@@ -219,13 +241,10 @@ class Window(QMainWindow):
         page.addWidget(heading)
         self.times = label("本地存档时间：暂无\n云端存档时间：请刷新云端状态")
         page.addWidget(self.times)
-        self.auto_download = QCheckBox("开始游戏前自动云同步（默认关闭）")
-        self.auto_download.clicked.connect(self.toggle_auto_download)
-        page.addWidget(self.auto_download)
-        page.addWidget(label("通过本工具的“开始游戏”生效；直接从 Steam 开始无法拦截。本地有未上传进度时会暂停启动并提示。"))
-        self.auto = QCheckBox("游戏关闭后自动上传云存档（默认关闭，需保持本程序运行）")
-        self.auto.clicked.connect(self.toggle_auto)
-        page.addWidget(self.auto)
+        self.auto_sync = QCheckBox("自动云同步（开始前同步，退出后上传；默认关闭）")
+        self.auto_sync.clicked.connect(self.toggle_auto_sync)
+        page.addWidget(self.auto_sync)
+        page.addWidget(label("开启时配置 Steam 启动项；此后从 Steam 正常启动。后台运行自动上传，进度冲突时暂停并提示。"))
         row = QHBoxLayout()
         button("本地同步到云端", self.upload, row)
         button("云端同步到本地", self.download, row)
@@ -268,8 +287,118 @@ class Window(QMainWindow):
         self.monitor.setInterval(3000)
         self.monitor.timeout.connect(self.monitor_games)
         self.monitor.start()
+        self.command_timer = QTimer(self)
+        self.command_timer.setInterval(500)
+        self.command_timer.timeout.connect(self.process_launch_requests)
         self.load_accounts(ui.get("account"))
         QTimer.singleShot(0, self.refresh)
+
+    def setup_background(self):
+        self.server = CommandServer(server_name(self.data), self)
+        self.server.command.connect(self.handle_command)
+        self.command_timer.start()
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = QSystemTrayIcon(self.windowIcon(), self)
+            self.tray.setToolTip("UmeYc-SteamBack：后台监听中")
+            menu = QMenu(self)
+            show = menu.addAction("打开存档管理")
+            show.triggered.connect(self.show_window)
+            activity = menu.addAction("查看后台同步记录")
+            activity.triggered.connect(lambda: (self.show_window(), self.show_activity()))
+            menu.addSeparator()
+            quit_action = menu.addAction("退出程序（停止监听）")
+            quit_action.triggered.connect(self.quit_app)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(lambda reason: self.show_window() if reason == QSystemTrayIcon.DoubleClick else None)
+            self.tray.show()
+
+    def show_window(self):
+        self.session_host = False  # Explicitly opened management stays available.
+        self.background_mode = False
+        self.centralWidget().setUpdatesEnabled(True)
+        self.monitor.setInterval(3000)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if self.page_dirty:
+            self.page_dirty = False
+            self.render_game()
+
+    def hide_window(self):
+        self.background_mode = True
+        self.hide()
+        self.centralWidget().setUpdatesEnabled(False)
+        self.monitor.setInterval(5000)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.WindowStateChange and self.isMinimized() and self.tray:
+            QTimer.singleShot(0, self.hide_window)
+
+    def quit_app(self):
+        if self.busy or self.launch_requests:
+            self.show_window()
+            self.status.setText("正在同步存档，请完成后再退出；关闭窗口仍可在后台继续")
+            return
+        self.quitting = True
+        self.monitor.stop()
+        self.command_timer.stop()
+        if self.tray:
+            self.tray.hide()
+        QApplication.instance().quit()
+
+    def handle_command(self, command, reply):
+        if command["action"] == "show":
+            self.show_window()
+            reply({"ok": True})
+            return
+        if len(self.launch_requests) >= 10:
+            reply({"ok": False, "error": "等待同步的启动请求过多"})
+            return
+        self.launch_requests.append((command, reply))
+        self.process_launch_requests()
+
+    def process_launch_requests(self):
+        if self.busy or not self.launch_requests:
+            return
+        command, reply = self.launch_requests.pop(0)
+        account, aid = command["account"], command["game_id"]
+        self.last_session_work = time.monotonic()
+        try:
+            desktop.check_steam_account(account)
+            if self.engine.account_ids != {account}:
+                raise ValueError("监听账号与 Steam 游戏账号不同，请打开工具选择正确账号")
+            games = {g["game_id"]: g for g in self.items}
+            for game in self.engine.configured_games():
+                games.setdefault(game["game_id"], game)
+            if aid not in games:
+                raise ValueError("请先在工具里配置此游戏的存档路径")
+            game = games[aid]
+            if command["action"] == "finished":
+                self.sessions.pop((account, aid), None)
+                # Registry can remain running until the wrapper exits. Let
+                # observe() wait for it to clear before scheduling the upload.
+                if self.cloud.uid and self.cloud.read_state().get(self.cloud.key(account, game), {}).get("auto_upload"):
+                    self.upload_queue.previous = ((self.cloud.uid, account), {aid} | (self.upload_queue.previous or (None, set()))[1])
+                reply({"ok": True})
+                return
+        except (ValueError, OSError) as error:
+            reply({"ok": False, "error": str(error)})
+            return
+        if (account, aid) in self.sessions:
+            reply({"ok": False, "error": "此游戏已存在运行中的同步会话，请退出后再启动"})
+            return
+        def done(result):
+            self.sessions[(account, aid)] = time.monotonic()
+            self.page_dirty = True
+            self.status.setText(result["message"])
+            reply({"ok": True})
+        def failed(error):
+            text = str(error) if isinstance(error, (ValueError, OSError)) else "启动前同步失败，请打开工具检查"
+            self.status.setText(text)
+            reply({"ok": False, "error": text})
+        self.task("正在执行 Steam 启动前云同步…", lambda: self.cloud.prepare_steam_launch(account, game), done, failed, quiet=True)
 
     def task(self, message, function, done=None, failed=None, quiet=False):
         if self.busy:
@@ -307,7 +436,8 @@ class Window(QMainWindow):
     def error(self, error):
         text = str(error) if isinstance(error, (ValueError, OSError)) else f"操作失败（{type(error).__name__}），请重试"
         self.status.setText(text)
-        QMessageBox.warning(self, "未完成操作", text)
+        if not self.background_mode:
+            QMessageBox.warning(self, "未完成操作", text)
 
     def confirm(self, text):
         dialog = QMessageBox(self)
@@ -340,6 +470,7 @@ class Window(QMainWindow):
         self.engine.account_ids = {account} if account else set()
         self.cloud.active_account = account
         self.last_running = None
+        self.upload_queue.previous = None
         self.pending_auto.clear()
         self.game = None
         self.remote = None
@@ -434,6 +565,9 @@ class Window(QMainWindow):
         return True
 
     def render_game(self):
+        if self.background_mode:
+            self.page_dirty = True
+            return
         self.page.setEnabled(bool(self.game and self.engine.account_ids))
         if not self.game:
             self.title.setText("选择左侧游戏")
@@ -456,12 +590,10 @@ class Window(QMainWindow):
             if self.game and self.game["game_id"] == selected_game["game_id"] and self.engine.account == account:
                 self.render_times()
         def read_local():
-            if not self.busy and QApplication.activeModalWidget() is None:
+            if not self.background_mode and not self.busy and QApplication.activeModalWidget() is None:
                 self.task("", lambda: self.cloud.isolated_engine(account).save_time(selected_game), update_local, quiet=True)
         QTimer.singleShot(0, read_local)
-        enabled = self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_upload", False)
-        self.auto.setChecked(enabled)
-        self.auto_download.setChecked(self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_download", False))
+        self.auto_sync.setChecked(self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_sync", False))
         records = self.engine.backups(game)
         self.records.setRowCount(len(records))
         sources = {"manual": "手动备份", "cloud_download": "云端下载", "before_cloud_sync": "同步前本地备份", "before_restore": "恢复前本地备份"}
@@ -561,31 +693,77 @@ class Window(QMainWindow):
             self.status.setText("云端状态已刷新" if remote else "云端暂无此游戏的存档")
         self.task("正在读取云端存档时间…", work, show)
 
-    def toggle_auto(self, enabled):
+    def toggle_auto_sync(self, enabled):
         if self.require_game():
             game, account = dict(self.game), self.engine.account
-            self.task("正在保存自动上传设置…", lambda: self.cloud.set_auto(account, game, enabled), lambda _: self.render_game(),
+            def save():
+                result = self.cloud.set_auto_sync(account, game, enabled)
+                if not enabled:
+                    self.upload_queue.clear(self.cloud.uid, account, game["game_id"])
+                return result
+            def done(_):
+                self.render_game()
+                if enabled:
+                    self.status.setText("自动云同步已开启，配置启动项后会按需运行；正常同步不弹窗")
+                    if not self.launch_options.installed(account, game["game_id"]):
+                        self.configure_launch_options()
+            self.task("正在保存自动云同步设置…", save, done,
                       lambda e: (self.render_game(), self.error(e)))
-
-    def toggle_auto_download(self, enabled):
-        if self.require_game():
-            game, account = dict(self.game), self.engine.account
-            self.task("正在保存启动前同步设置…", lambda: self.cloud.set_auto_download(account, game, enabled),
-                      lambda _: self.render_game(), lambda e: (self.render_game(), self.error(e)))
 
     def launch_game(self):
         if not self.require_game():
             return
         game, account = dict(self.game), self.engine.account
-        def start(result):
-            if self.engine.account != account:
-                return self.error(ValueError("Steam 账号已变化，已取消启动"))
-            self.engine.guard(game)
-            if not QDesktopServices.openUrl(QUrl(f"steam://rungameid/{int(game['game_id'])}")):
-                raise ValueError("无法唤起 Steam，请确认已安装并登录 Steam")
-            self.status.setText(result["message"] + "；已请求 Steam 启动游戏")
-            self.render_game()
-        self.task("正在检查启动前云存档同步，请稍候…", lambda: self.cloud.prepare_game_launch(account, game), start)
+        # Steam launch options own the preflight check when configured. This
+        # button requests the same normal Steam entry; no duplicate download.
+        if not QDesktopServices.openUrl(QUrl(f"steam://rungameid/{int(game['game_id'])}")):
+            self.error(ValueError("无法打开 Steam"))
+
+    def configure_launch_options(self, checked=False):
+        if not self.require_game():
+            return
+        account, game = self.engine.account, dict(self.game)
+        try:
+            old, generated = self.launch_options.preview(account, game["game_id"])
+            self.launch_options.remember_preview(account, game["game_id"], generated)
+        except (ValueError, OSError) as error:
+            return self.error(error)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("配置 Steam 启动项")
+        dialog.resize(760, 380)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label("无需重启 Steam：复制下方内容，打开游戏属性，粘贴到“启动选项”。只增加同步入口，已保留原参数。非 Steam 快捷游戏不适用此方式。"))
+        layout.addWidget(label("原启动选项：" + (old or "（空）")))
+        content = QPlainTextEdit(generated)
+        content.setReadOnly(True)
+        layout.addWidget(content)
+        row = QHBoxLayout()
+        button("复制启动项", lambda: QApplication.clipboard().setText(generated), row)
+        button("打开游戏属性", lambda: QDesktopServices.openUrl(QUrl(f"steam://gameproperties/{game['game_id']}")), row)
+        layout.addLayout(row)
+        layout.addWidget(label("也可以先手动退出 Steam，再点“直接写入”。写入前自动备份配置；不会强制退出或重启 Steam。移动程序目录后需重新配置。关闭自动云同步后会跳过同步并正常启动。"))
+        row = QHBoxLayout()
+        def apply():
+            dialog.accept()
+            self.task("正在备份并写入启动项…", lambda: self.launch_options.update(account, game["game_id"]))
+        button("Steam 已退出，直接写入", apply, row)
+        button("关闭", dialog.reject, row)
+        layout.addLayout(row)
+        dialog.exec()
+
+    def show_activity(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("后台同步记录")
+        dialog.resize(680, 400)
+        layout = QVBoxLayout(dialog)
+        records = read_json(self.upload_queue.activity)
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText("\n\n".join(f"{date(r['time'])} · {r['game_name']}\n{r['message']}"
+                                    for r in sorted(records.values(), key=lambda r: r["time"], reverse=True)) or "暂无后台同步记录")
+        layout.addWidget(view)
+        button("关闭", dialog.accept, layout)
+        dialog.exec()
 
     def upload(self):
         if not self.require_game():
@@ -737,29 +915,58 @@ class Window(QMainWindow):
         self.task("正在退出夸克…", self.cloud.client.logout, show)
 
     def monitor_games(self):
-        if self.busy or not self.engine.account_ids or QApplication.activeModalWidget() is not None:
+        if self.busy or self.launch_requests or not self.engine.account_ids:
             return
         account = self.engine.account
-        items = list(self.items)
-        def observed(running):
+        self.maybe_exit_session()
+        state = self.cloud.read_state()
+        items = [game for game in self.items if state.get(self.cloud.key(account, game), {}).get("auto_upload")]
+        if not items:
+            return
+        uid = self.cloud.uid
+        def observe():
+            desktop.check_steam_account(account)
+            running = steam.running_games(items)
+            self.upload_queue.observe(uid, account, items, running)
+            return running, self.upload_queue.next(uid, account, running)
+        def observed(result):
+            running, pending = result
             self.cloud.running = {(account, aid) for aid in running}
-            if self.last_running is not None:
-                exited = self.last_running - running
-                for game in items:
-                    if game["game_id"] in exited and self.cloud.read_state().get(self.cloud.key(account, game), {}).get("auto_upload"):
-                        self.pending_auto.append((time.monotonic() + 6, game))
-            self.last_running = running
-            ready = next(((when, g) for when, g in self.pending_auto if time.monotonic() >= when), None)
-            if ready:
-                self.pending_auto.remove(ready)
-                game = ready[1]
-                if game["game_id"] not in running:
-                    self.task(f"{game['game_name']} 已退出，正在自动上传…",
-                              lambda: self.cloud.upload(account, game), self.synced,
-                              lambda e: self.status.setText(f"自动上传已停止：{e}。请检查后手动同步。"))
-        self.task("", lambda: steam.running_games(items), observed, quiet=True)
+            now = time.monotonic()
+            for key, started in list(self.sessions.items()):
+                if key[0] == account and key[1] not in running and now - started > 90:
+                    # Recover if the Steam wrapper was killed before reporting
+                    # its exit. Upload intents are already persisted by observe.
+                    self.sessions.pop(key, None)
+            if pending:
+                def upload():
+                    try:
+                        result = self.cloud.upload_after_exit(account, pending["game"], uid)
+                    except Exception as error:
+                        self.upload_queue.finish(pending, error)
+                        raise
+                    self.upload_queue.finish(pending)
+                    return result
+                self.task("正在后台上传云存档…", upload, self.synced,
+                          lambda e: self.background_error(e), quiet=True)
+        self.task("", observe, observed, lambda e: self.status.setText(str(e)), quiet=True)
+
+    def background_error(self, error):
+        self.status.setText(f"后台上传稍后重试：{error}（详见后台记录）")
+        if self.tray:
+            self.tray.setToolTip("UmeYc-SteamBack：上传未完成，正在重试；右键查看记录")
+
+    def maybe_exit_session(self):
+        if (not self.session_host or self.busy or self.launch_requests or self.sessions or self.cloud.running
+                or self.upload_queue.pending or time.monotonic() - self.last_session_work < 20):
+            return
+        self.quit_app()
 
     def closeEvent(self, event):
+        if self.tray and not self.quitting:
+            self.hide_window()
+            event.ignore()
+            return
         if self.busy:
             self.status.setText("正在处理存档，请等待当前操作完成后退出")
             event.ignore()
@@ -784,15 +991,36 @@ def main():
     data.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(data / ".application.lock"))
     if not lock.tryLock(100):
-        QMessageBox.information(None, "UmeYc-SteamBack-Windows", "程序已在运行，请使用已打开的窗口")
+        if "--background" not in sys.argv:
+            try:
+                result = request(server_name(data), {"action": "show"})
+                if not result:
+                    QMessageBox.information(None, "UmeYc-SteamBack-Windows", "后台正在启动，请稍后打开")
+            except (ValueError, OSError):
+                pass
         return
     app.setStyle("Fusion")
     window = Window(data)
-    window.show()
+    window.session_host = "--session-host" in sys.argv
+    if not smoke_temp:
+        try:
+            window.launch_options.recover()
+            window.setup_background()
+        except (ValueError, OSError) as error:
+            window.error(error)
+    if "--background" in sys.argv and (window.tray or window.session_host):
+        window.hide_window()
+    else:
+        window.show()
     if smoke_temp:
         window.monitor.stop()
         QTimer.singleShot(2000, app.quit)
+    app.setQuitOnLastWindowClosed(not bool(window.tray))
     app.exec()
+    window.monitor.stop()
+    window.command_timer.stop()
+    if window.tray:
+        window.tray.hide()
     lock.unlock()
     if smoke_temp:
         smoke_temp.cleanup()

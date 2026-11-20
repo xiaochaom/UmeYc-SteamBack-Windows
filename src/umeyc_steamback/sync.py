@@ -5,12 +5,54 @@ import shutil
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 
 from .protocol.cloud import CloudService, digest, unpack_verified
 from .protocol.custom import write_json
 
 
 class WindowsCloud(CloudService):
+    def isolated_engine(self, account):
+        engine = super().isolated_engine(account)
+        if getattr(self, "hook_game_id", None) is not None:
+            engine.config = replace(engine.config, prelaunch_game_id=self.hook_game_id)
+        return engine
+
+    def prepare_steam_launch(self, account, game):
+        from .desktop import check_steam_account
+        with self.lock:
+            check_steam_account(account)
+            aid = game["game_id"]
+            was_running = (account, aid) in self.running
+            self.running.discard((account, aid))
+            self.hook_game_id = aid
+            try:
+                self.isolated_engine(account).guard(game)
+                return self._prepare_launch(account, aid)
+            finally:
+                self.hook_game_id = None
+                if was_running:
+                    self.running.add((account, aid))
+
+    def upload_after_exit(self, account, game, uid, wait=None):
+        from .desktop import check_steam_account
+        from .protocol.cloud import source_plan
+        from .protocol.custom import safe_file
+        wait = wait or time.sleep
+        previous = None
+        for _ in range(15):
+            check_steam_account(account)
+            engine = self.isolated_engine(account)
+            engine.guard(game)
+            info, files, _ = source_plan(engine, game)
+            current = [(root, f, safe_file(root, f).stat().st_size, safe_file(root, f).stat().st_mtime_ns)
+                       for root, suffix in info["save_games_roots"].items() for f in files[suffix]]
+            if current and current == previous:
+                return self.upload(account, game, expected_uid=uid)
+            previous = current
+            wait(2)
+        raise ValueError("存档仍在变化，已延后自动上传")
+
     def _download_for_launch(self, account, game, revision, uid):
         self.download(account, game, revision, uid)
 
