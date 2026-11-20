@@ -197,7 +197,7 @@ def test_parent_timeout_never_changes_or_restarts_live_program(staged, monkeypat
 
 def test_cross_directory_update_plan_is_rejected(staged, tmp_path):
     target, data, prepared, plan, waited = staged
-    saved = json.loads(plan.read_text())
+    saved = json.loads(plan.read_text(encoding="utf-8"))
     saved["target"] = str(tmp_path / "other-application")
     write_json(plan, saved)
     with pytest.raises(ValueError, match="路径"):

@@ -41,20 +41,20 @@ def main():
         worker = None
         try:
             plan_path = make_plan(PreparedUpdate("0.1.4", work, payload), target)
-            plan = json.loads(plan_path.read_text())
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
             plan.update(pid=parent.pid, started=psutil.Process(parent.pid).create_time(), restart_args=["--smoke-test"])
             write_json(plan_path, plan)
             worker = subprocess.Popen([str(payload / EXE), "--apply-update", str(plan_path)], cwd=target)
             assert worker.wait(timeout=120) == 0, "Packaged updater failed"
             parent.wait(timeout=10)
-            result = json.loads((data / "updates/result.json").read_text())
+            result = json.loads((data / "updates/result.json").read_text(encoding="utf-8"))
             assert result["ok"], result
             assert digest(target / EXE) == digest(original / EXE)
             assert not (target / "_internal/old.dll").exists()
             assert (data / "games.json").read_bytes() == b"configuration must stay"
             assert (data / "quark/session.cookies").read_bytes() == b"encrypted-session"
             assert (target / "backups/save.zip").read_bytes() == b"backup must stay"
-            pid = json.loads((work / "restarted.json").read_text())["pid"]
+            pid = json.loads((work / "restarted.json").read_text(encoding="utf-8"))["pid"]
             try:
                 restarted = psutil.Process(pid)
             except psutil.NoSuchProcess:
