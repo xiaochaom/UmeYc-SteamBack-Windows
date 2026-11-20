@@ -38,6 +38,9 @@ jobs:
           --copy-metadata PySide6-Essentials --copy-metadata qrcode
           --copy-metadata vdf --copy-metadata psutil
           scripts/launch.py
+      - name: Verify Explorer executable icon
+        if: matrix.python == '3.12'
+        run: python scripts/verify_exe_icon.py dist/UmeYc-SteamBack-Windows/UmeYc-SteamBack-Windows.exe src/umeyc_steamback/assets/cloud-save.ico
       - name: Smoke-test packaged Windows executable
         if: matrix.python == '3.12'
         shell: pwsh

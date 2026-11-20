@@ -20,6 +20,16 @@ def build_icon(source, destination):
         margin = max(1, size / 16)
         renderer.render(painter, QRectF(margin, margin, size - 2 * margin, size - 2 * margin))
         painter.end()
+        if size <= 48:
+            # Classic 32-bit DIB entries work in Explorer's small-icon views;
+            # PNG entries remain available for high-DPI and large icons.
+            pixels = b"".join(bytes((c.blue(), c.green(), c.red(), c.alpha()))
+                              for y in reversed(range(size)) for x in range(size)
+                              for c in [bitmap.pixelColor(x, y)])
+            mask = b"\0" * (((size + 31) // 32) * 4 * size)
+            header = struct.pack("<IiiHHIIiiII", 40, size, size * 2, 1, 32, 0, len(pixels), 0, 0, 0, 0)
+            images.append((size, header + pixels + mask))
+            continue
         data = QByteArray()
         buffer = QBuffer(data)
         buffer.open(QIODevice.WriteOnly)

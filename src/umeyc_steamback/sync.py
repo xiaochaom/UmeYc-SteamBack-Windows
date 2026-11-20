@@ -7,11 +7,46 @@ import time
 import uuid
 from dataclasses import replace
 
-from .protocol.cloud import CloudService, CURRENT_BASELINE, digest, unpack_verified
+from .protocol.cloud import CloudService, CURRENT_BASELINE, digest, unpack_verified, pack_current
 from .protocol.custom import write_json
 
 
 class WindowsCloud(CloudService):
+    def manual_snapshot(self, account, game):
+        """Read fresh comparison data; never authorize from cached UI times."""
+        with self.lock:
+            engine = self.isolated_engine(account)
+            engine.guard(game)
+            uid = self.client.account()["user_id"]
+            if self.active_account not in (None, account):
+                raise ValueError("Steam 账号已变化，请重新同步")
+            self.uid = uid
+            remote = self.latest(account, game)
+            return {"uid": uid, "remote": remote, "local_time": engine.save_time(game),
+                    "local_hash": self._local_hash(engine, game), "settings": engine.settings(game)}
+
+    def _local_hash(self, engine, game):
+        plan = engine._custom_plan(game)
+        if not any(plan["custom_files"].values()):
+            return None
+        with tempfile.TemporaryDirectory(dir=engine.data) as temp:
+            return pack_current(engine, game, Path(temp) / "local.zip")["content_hash"]
+
+    def manual_transfer(self, account, game, direction, snapshot):
+        with self.lock:
+            current = self.manual_snapshot(account, game)
+            if (current["uid"] != snapshot["uid"] or current["local_hash"] != snapshot["local_hash"]
+                    or current["local_time"] != snapshot["local_time"] or current["settings"] != snapshot["settings"]
+                    or (current["remote"] or {}).get("revision") != (snapshot["remote"] or {}).get("revision")):
+                raise ValueError("确认期间存档或账号已变化，请重新点击同步并确认")
+            remote = current["remote"]
+            if direction == "upload":
+                return self.upload(account, game, (remote or {}).get("revision"), current["uid"], confirmed_source=current)
+            if direction != "download" or not remote:
+                raise ValueError("云端暂无可下载的存档")
+            return self.download(account, game, remote["revision"], current["uid"],
+                                 local_snapshot=current)
+
     def isolated_engine(self, account):
         engine = super().isolated_engine(account)
         if getattr(self, "hook_game_id", None) is not None:
@@ -60,9 +95,9 @@ class WindowsCloud(CloudService):
         self.isolated_engine(account).guard(game)
         return self._prepare_launch(account, game["game_id"])
 
-    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE):
+    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE, confirmed_source=None):
         self.isolated_engine(account).guard(game)
-        return super().upload(account, game, expected_revision, expected_uid, base_hash=base_hash)
+        return super().upload(account, game, expected_revision, expected_uid, base_hash=base_hash, confirmed_source=confirmed_source)
 
     def inspect(self, account, game, expected_revision=None):
         with self.lock:
@@ -94,7 +129,7 @@ class WindowsCloud(CloudService):
                 raise ValueError("云端暂无存档，请先从另一台设备上传")
             return self.download(account, game, remote["revision"], uid)
 
-    def download(self, account, game, revision, expected_uid):
+    def download(self, account, game, revision, expected_uid, local_snapshot=None):
         with self.lock:
             self.uid = self.client.account()["user_id"]
             if self.uid != expected_uid or self.active_account not in (None, account):
@@ -133,6 +168,11 @@ class WindowsCloud(CloudService):
                 if self.client.account()["user_id"] != expected_uid or self.active_account not in (None, account):
                     raise ValueError("账号已变化，未覆盖游戏存档")
                 engine.guard(game)
+                if local_snapshot is not None and (
+                        self._local_hash(engine, game) != local_snapshot["local_hash"]
+                        or engine.save_time(game) != local_snapshot["local_time"]
+                        or engine.settings(game) != local_snapshot["settings"]):
+                    raise ValueError("下载期间本地存档已变化，未覆盖，请重新同步并确认")
                 engine.align_cloud_paths(game, manifest)
                 engine.apply(game, manifest, staging, "cloud_sync")
                 self.remember(account, game, manifest["content_hash"])

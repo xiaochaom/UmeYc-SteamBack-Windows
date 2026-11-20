@@ -314,8 +314,7 @@ def test_cloud_download_uses_configured_paths_without_dialog(tmp_path, monkeypat
     w.engine.configure(w.game, [str(source)])
     monkeypatch.setattr(QDialog, "exec", lambda _: pytest.fail("已配置路径不应弹窗"))
     calls = []
-    monkeypatch.setattr(w, "task", lambda message, function, done: function())
-    monkeypatch.setattr(w.cloud, "download_current", lambda account, game: calls.append((account, game)))
+    monkeypatch.setattr(w, "start_manual_transfer", lambda account, game, direction: calls.append((account, game)))
     w.download()
     assert calls == [(123, w.game)]
     assert w.engine.settings(w.game)["paths"] == [str(source)]
@@ -336,8 +335,7 @@ def test_cloud_download_asks_for_actual_path_once_only_if_unconfigured(tmp_path,
         dialog.items.addItem(str(source))
         return QDialog.Accepted if accepted else QDialog.Rejected
     monkeypatch.setattr(PathsDialog, "exec", select)
-    monkeypatch.setattr(w, "task", lambda message, function, done: function())
-    monkeypatch.setattr(w.cloud, "download_current", lambda *args: calls.append(args))
+    monkeypatch.setattr(w, "start_manual_transfer", lambda *args: calls.append(args))
     w.download()
     assert dialogs == ["选择游戏实际存档路径"]
     assert bool(calls) == accepted
@@ -455,3 +453,44 @@ def test_update_download_error_does_not_affect_save_worker(tmp_path, monkeypatch
     assert w.check_update_button.isEnabled() and w.download_update_button.isEnabled()
     assert w.status.text() == "存档同步中" and "校验失败" in w.update_status.text()
     assert not w.prepared_update
+
+
+@pytest.mark.parametrize("direction,local,remote_time,confirm,transferred", [
+    ("upload", 1000, 2000, False, False), ("upload", 1000, 2000, True, True),
+    ("download", 2000, 1000, False, False), ("download", 2000, 1000, True, True),
+    ("upload", 2000, 1000, None, True), ("download", 1000, 2000, None, True),
+    ("upload", 1000, 1000, None, True), ("download", None, 1000, None, True),
+])
+def test_manual_sync_confirms_older_over_newer_in_both_directions(tmp_path, monkeypatch, direction, local, remote_time, confirm, transferred):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.game = {"game_id": 42, "game_name": "测试"}
+    snapshot = {"uid": "uid", "local_time": local, "local_hash": "local",
+                "remote": {"save_time": remote_time, "revision": "rev", "content_hash": "remote"}}
+    w.cloud.uid = "uid"
+    monkeypatch.setattr(w.cloud, "manual_snapshot", lambda *_: snapshot)
+    monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"synced_hash": "remote"}})
+    monkeypatch.setattr(w, "task", lambda message, function, done: done(function()))
+    prompts, calls = [], []
+    def ask(text):
+        assert confirm is not None, "newer/equal saves must not prompt"
+        prompts.append(text)
+        return confirm
+    monkeypatch.setattr(w, "confirm", ask)
+    monkeypatch.setattr(w, "synced", lambda _: None)
+    monkeypatch.setattr(w.cloud, "manual_transfer", lambda *args: calls.append(args))
+    if direction == "upload":
+        w.upload()
+    else:
+        monkeypatch.setattr(w.engine, "settings", lambda _: {"paths": ["actual save path"]})
+        w.download()
+    assert bool(calls) == transferred
+    assert bool(prompts) == (confirm is not None)
+    if prompts:
+        assert "较旧" in prompts[0] and "较新" in prompts[0]
+        assert "本地存档时间：" in prompts[0] and "云端存档时间：" in prompts[0]
+        assert ("本地存档覆盖云端" if direction == "upload" else "云端存档覆盖本地") in prompts[0]
+    if not transferred:
+        assert "已取消" in w.status.text()

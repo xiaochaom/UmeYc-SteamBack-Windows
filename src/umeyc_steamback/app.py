@@ -898,13 +898,30 @@ class Window(QMainWindow):
         if not self.require_game():
             return
         game, account = dict(self.game), self.engine.account
-        def conflict(error):
-            if isinstance(error, CloudConflict):
-                if self.confirm(f"云端存在未同步版本（存档时间：{date(error.remote.get('save_time'))}）。用当前本地存档替换？云端旧版本会删除。"):
-                    self.task("正在确认版本并上传…", lambda: self.cloud.upload(account, game, error.remote.get("revision")), self.synced, conflict)
-            else:
-                self.error(error)
-        self.task("正在打包并上传到夸克…", lambda: self.cloud.upload(account, game), self.synced, conflict)
+        self.start_manual_transfer(account, game, "upload")
+
+    def start_manual_transfer(self, account, game, direction):
+        def inspected(snapshot):
+            if self.engine.account_ids != {account} or not self.game or self.game["game_id"] != game["game_id"]:
+                return
+            remote = snapshot["remote"]
+            if direction == "download" and not remote:
+                return self.error(ValueError("云端暂无存档，请先从另一台设备上传"))
+            local_time, cloud_time = snapshot["local_time"], (remote or {}).get("save_time")
+            source, target = (local_time, cloud_time) if direction == "upload" else (cloud_time, local_time)
+            older = source is not None and target is not None and source < target
+            state = self.cloud.read_state().get(self.cloud.key(account, game), {})
+            conflict = (direction == "upload" and remote and remote["content_hash"] != snapshot["local_hash"]
+                        and remote["content_hash"] != state.get("synced_hash"))
+            if older or conflict:
+                action = "用本地存档覆盖云端存档" if direction == "upload" else "用云端存档覆盖本地存档"
+                reason = "即将用较旧的存档覆盖较新的存档。" if older else "云端存在尚未同步的不同进度。"
+                if not self.confirm(f"{reason}\n本地存档时间：{date(local_time)}\n云端存档时间：{date(cloud_time)}\n确定{action}？"):
+                    self.status.setText("已取消同步，存档未修改")
+                    return
+            self.task("正在上传云存档…" if direction == "upload" else "正在下载并覆盖存档，覆盖前保存本地备份…",
+                      lambda: self.cloud.manual_transfer(account, game, direction, snapshot), self.synced)
+        self.task("正在核对本地和云端存档时间…", lambda: self.cloud.manual_snapshot(account, game), inspected)
 
     def synced(self, result):
         self.status.setText(result["message"])
@@ -926,8 +943,7 @@ class Window(QMainWindow):
                 return self.error(error)
         # The user chose cloud -> local. Reuse the actual game paths and stage
         # the archive privately; no second per-directory mapping dialog.
-        self.task("正在下载并覆盖游戏存档，覆盖前保存本地备份…",
-                  lambda: self.cloud.download_current(account, game), self.synced)
+        self.start_manual_transfer(account, game, "download")
 
     def backup(self):
         if self.require_game():

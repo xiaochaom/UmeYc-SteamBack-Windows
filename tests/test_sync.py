@@ -310,3 +310,78 @@ def test_direct_download_race_preserves_live_save_and_keeps_download(setup, monk
         cloud.download_current(123, g)
     assert (source / "slot.sav").read_bytes() == b"local progress"
     assert {b["source"] for b in e.backups(g)} == {"cloud_download"}
+
+
+@pytest.mark.parametrize("direction", ["upload", "download"])
+def test_manual_transfer_uses_confirmed_snapshot(setup, direction):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    (source / "slot.sav").write_bytes(b"local progress")
+    snapshot = cloud.manual_snapshot(123, g)
+    assert snapshot["local_time"] > snapshot["remote"]["save_time"]
+    cloud.manual_transfer(123, g, direction, snapshot)
+    if direction == "upload":
+        assert cloud.latest(123, g)["content_hash"] == snapshot["local_hash"]
+    else:
+        assert (source / "slot.sav").read_bytes() == b"chapter one"
+        assert {b["source"] for b in e.backups(g)} == {"cloud_download", "before_cloud_sync"}
+
+
+@pytest.mark.parametrize("direction", ["upload", "download"])
+@pytest.mark.parametrize("change", ["content", "time", "path", "account", "revision"])
+def test_manual_confirmation_cannot_authorize_a_changed_save(setup, tmp_path, direction, change):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    snapshot = cloud.manual_snapshot(123, g)
+    if change == "content":
+        (source / "slot.sav").write_bytes(b"new save")
+    elif change == "time":
+        stamp = (source / "slot.sav").stat().st_mtime_ns + 10**9
+        os.utime(source / "slot.sav", ns=(stamp, stamp))
+    elif change == "path":
+        another = tmp_path / "another"
+        shutil.copytree(source, another)
+        e.configure(g, [str(another)])
+    elif change == "account":
+        client.user_id = "other-user"
+    else:
+        (source / "slot.sav").write_bytes(b"cloud change")
+        cloud.upload(123, g)
+        (source / "slot.sav").write_bytes(b"chapter one")
+    live = (source / "slot.sav").read_bytes()
+    remote = cloud.latest(123, g)["revision"]
+    with pytest.raises(ValueError, match="确认期间"):
+        cloud.manual_transfer(123, g, direction, snapshot)
+    assert (source / "slot.sav").read_bytes() == live
+    assert cloud.latest(123, g)["revision"] == remote
+    assert not e.backups(g)
+
+
+def test_manual_download_rechecks_local_time_after_transfer(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    snapshot = cloud.manual_snapshot(123, g)
+    real_download = client.download
+    def download(fid, destination, limit=None):
+        real_download(fid, destination, limit)
+        if fid == snapshot["remote"]["archive_fid"]:
+            (source / "slot.sav").write_bytes(b"new progress during download")
+    monkeypatch.setattr(client, "download", download)
+    with pytest.raises(ValueError, match="下载期间"):
+        cloud.manual_transfer(123, g, "download", snapshot)
+    assert (source / "slot.sav").read_bytes() == b"new progress during download"
+    assert {b["source"] for b in e.backups(g)} == {"cloud_download"}
+
+
+def test_manual_upload_checks_packaged_save_against_confirmation(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    snapshot = cloud.manual_snapshot(123, g)
+    real_pack = pack_current
+    def pack(engine, game, archive):
+        (source / "slot.sav").write_bytes(b"changed after confirmation")
+        return real_pack(engine, game, archive)
+    monkeypatch.setattr("umeyc_steamback.protocol.cloud.pack_current", pack)
+    with pytest.raises(ValueError, match="确认后"):
+        cloud.manual_transfer(123, g, "upload", snapshot)
+    assert cloud.latest(123, g)["revision"] == snapshot["remote"]["revision"]

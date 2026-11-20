@@ -373,7 +373,7 @@ class CloudService:
         except (ValueError, OSError, KeyError, TypeError):
             return warning
 
-    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE):
+    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE, confirmed_source=None):
         with self.lock:
             auth = self.client.account(); self.uid = auth["user_id"]
             if expected_uid is not None and self.uid != expected_uid:
@@ -386,6 +386,11 @@ class CloudService:
             with tempfile.TemporaryDirectory(dir=engine.config.app_data_dir) as temp:
                 archive = Path(temp) / "save.zip"
                 manifest = pack_current(engine, game, archive)
+                if confirmed_source is not None and (
+                        manifest["content_hash"] != confirmed_source["local_hash"]
+                        or manifest["save_time"] != confirmed_source["local_time"]
+                        or engine.settings(game) != confirmed_source["settings"]):
+                    raise ValueError("确认后本地存档已变化，未上传，请重新同步并确认")
                 remote = self.latest(account, game)
                 folder = self.directory(account, game, create=True)
                 before = self.client.list_files(folder)
@@ -410,6 +415,8 @@ class CloudService:
                 if self.active_account not in (None, account) or (account, game["game_id"]) in self.running:
                     raise ValueError("游戏已重新启动，未发布新的云端版本")
                 engine.guard(game)
+                if confirmed_source is not None and engine.save_time(game) != confirmed_source["local_time"]:
+                    raise ValueError("上传期间本地存档已变化，未发布，请重新同步并确认")
                 record = {"format": 1, "game_id": int(game["game_id"]), "steam_account": str(account),
                           "archive_name": stem + ".zip", "archive_fid": entry["fid"], "archive_hash": digest(archive),
                           "content_hash": manifest["content_hash"], "save_time": manifest["save_time"], "uploaded_at": int(time.time()*1000)}
