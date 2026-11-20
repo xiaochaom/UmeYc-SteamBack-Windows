@@ -2,6 +2,7 @@ name: Windows tests and portable build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -55,3 +56,25 @@ jobs:
             dist/UmeYc-SteamBack-Windows.zip
             dist/SHA256.txt
           retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: UmeYc-SteamBack-Windows-portable
+          path: release-assets
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          release-assets/UmeYc-SteamBack-Windows.zip release-assets/SHA256.txt
+          --title "UmeYc-SteamBack-Windows $RELEASE_TAG"
+          --notes-file doc/release-notes.md

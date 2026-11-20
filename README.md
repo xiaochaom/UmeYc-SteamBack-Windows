@@ -19,10 +19,11 @@ Windows 游戏存档管理工具，通过夸克网盘与 [UmeYc-SteamBack Steam 
 
 支持 Windows 10/11 x64。初版尚需真实账号和游戏联调；跨平台游戏本身的存档格式必须兼容。
 
-打开仓库 [Actions](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/actions)，选择通过的
-`Windows tests and portable build`，下载 `UmeYc-SteamBack-Windows-portable` 制品。
-解压里面的 ZIP，保持完整目录结构，运行 `UmeYc-SteamBack-Windows.exe`。不需要安装 Python。
-程序未签名。当前工作流只生成测试制品，不会自动发布 GitHub Release。
+打开仓库 [Releases](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/releases/latest)，
+下载 `UmeYc-SteamBack-Windows.zip`，解压并保持完整目录结构，运行
+`UmeYc-SteamBack-Windows.exe`。不需要安装 Python；`SHA256.txt` 可用于校验下载文件。
+程序未签名。主分支构建同时在 [Actions](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/actions)
+提供 30 天有效的调试制品。只有推送版本标签才会在所有 Windows 检查通过后发布 Release。
 
 源码运行（Python 3.11/3.12）：
 
