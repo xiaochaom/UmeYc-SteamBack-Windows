@@ -1076,6 +1076,10 @@ class Window(QMainWindow):
     def monitor_games(self):
         if self.close_requested or self.busy or self.installing_update or self.launch_requests or not self.engine.account_ids:
             return
+        # The Steam wrapper owns game lifecycle events. An idle management
+        # window has no reason to scan processes just because sync is enabled.
+        if not self.session_host and not self.sessions and not self.upload_queue.pending:
+            return
         account = self.engine.account
         self.maybe_exit_session()
         state = self.cloud.read_state()

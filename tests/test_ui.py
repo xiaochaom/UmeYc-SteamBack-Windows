@@ -54,6 +54,7 @@ def test_auto_sync_idle_polling_never_disables_the_window(tmp_path, monkeypatch)
     w.cloud.uid = "uid"
     w.game = {"game_id": 42, "game_name": "测试"}
     w.items = [w.game]
+    w.sessions[(123, 42)] = time.monotonic()
     monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"auto_upload": True}})
     monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
     monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
@@ -80,6 +81,18 @@ def test_auto_sync_idle_polling_never_disables_the_window(tmp_path, monkeypatch)
     assert not w.header.isEnabled() and not w.splitter.isEnabled()
     drain(_APPLICATION, w)
     assert w.header.isEnabled() and w.splitter.isEnabled()
+
+
+def test_idle_management_does_not_scan_games_just_because_auto_sync_is_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.cloud.uid = "uid"
+    w.items = [{"game_id": 42, "game_name": "测试"}]
+    monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"auto_sync": True, "auto_upload": True}})
+    monkeypatch.setattr(w, "task", lambda *args, **kwargs: pytest.fail("Idle management must not poll games"))
+    w.monitor_games()
 
 
 def test_rendering_auto_sync_checkbox_does_not_write_settings(tmp_path, monkeypatch):
