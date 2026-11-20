@@ -24,6 +24,7 @@ def cleanup_qt_windows():
         if isinstance(widget, Window):
             assert widget.update_pool.waitForDone(5000)
             widget.update_retry.stop()
+            widget.close_retry.stop()
             widget.monitor.stop()
             widget.command_timer.stop()
             widget.quitting = True
@@ -95,6 +96,48 @@ def test_rendering_auto_sync_checkbox_does_not_write_settings(tmp_path, monkeypa
     w.render_game()
     assert w.auto_sync.isChecked()
     assert signals == []
+
+
+def test_close_exits_instead_of_creating_or_hiding_to_tray(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QSystemTrayIcon
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
+    w = Window(tmp_path / "data")
+    w.show()
+    quits = []
+    monkeypatch.setattr(QApplication, "quit", lambda *args: quits.append(True))
+    w.setup_background()
+    assert not w.findChildren(QSystemTrayIcon)
+    assert w.close()
+    assert w.quitting and not w.isVisible() and not w.background_mode
+    assert not w.monitor.isActive() and not w.command_timer.isActive()
+    assert not w.server.server.isListening()
+    assert quits == [True]
+
+
+def test_close_waits_for_active_save_operation_then_exits_automatically(tmp_path, monkeypatch):
+    import threading
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.show()
+    completed, release = [], threading.Event()
+    quits = []
+    monkeypatch.setattr(QApplication, "quit", lambda *args: quits.append(True))
+    w.task("正在同步…", lambda: release.wait(3), lambda _: completed.append(True))
+    try:
+        assert not w.close()
+        assert w.isVisible() and w.close_retry.isActive() and not quits
+        release.set()
+        drain(_APPLICATION, w)
+        deadline = time.monotonic() + 2
+        while not quits and time.monotonic() < deadline:
+            _APPLICATION.processEvents()
+            time.sleep(.01)
+        assert completed == [True] and quits == [True]
+        assert w.quitting and not w.isVisible()
+    finally:
+        release.set()
 
 
 def test_window_worker_and_record_save_only_closes_record_dialog(tmp_path, monkeypatch):

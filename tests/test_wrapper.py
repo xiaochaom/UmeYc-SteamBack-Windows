@@ -40,6 +40,24 @@ def test_wrapper_bootstraps_host_only_when_needed(tmp_path):
     assert events == ["host"]
 
 
+def test_wrapper_wakes_exit_upload_host_when_user_closed_management(tmp_path):
+    events, attempts = [], []
+    def connect(name, command, timeout):
+        events.append(command["action"])
+        if command["action"] == "finished":
+            attempts.append(1)
+            if len(attempts) < 3:
+                return None
+        return {"ok": True}
+    def run(command):
+        events.append("game")
+        return SimpleNamespace(wait=lambda: 7)
+    result = run_steam_wrapper(args(), tmp_path, connect=connect,
+                              start_host=lambda: events.append("host"), wait=lambda _: None, run_game=run)
+    assert result == 7
+    assert events == ["prepare", "game", "finished", "host", "finished", "finished"]
+
+
 def test_original_game_arguments_cannot_be_parsed_as_tool_flags():
     value = parse_args(["--steam-launch", "--account", "123", "--game-id", "42", "--", "game.exe", "--account", "999"])
     assert value.account == 123

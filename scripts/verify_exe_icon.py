@@ -72,7 +72,8 @@ def shell_icons(path):
     large, small = wintypes.HICON(), wintypes.HICON()
     result = []
     try:
-        assert extract(str(Path(path).resolve()), 0, ctypes.byref(large), ctypes.byref(small), 1) == 1
+        count = extract(str(Path(path).resolve()), 0, ctypes.byref(large), ctypes.byref(small), 1)
+        assert count > 0 and large.value and small.value, f"Cannot extract default icons: count={count}"
         for handle in (large, small):
             info = ICONINFO()
             assert user.GetIconInfo(handle, ctypes.byref(info))
@@ -95,4 +96,10 @@ def shell_icons(path):
 
 
 if __name__ == "__main__":
-    verify(sys.argv[1], sys.argv[2])
+    try:
+        verify(sys.argv[1], sys.argv[2])
+    except Exception:
+        import traceback
+        details = traceback.format_exc().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error title=Executable icon check failed::{details}")
+        raise

@@ -6,13 +6,13 @@ import time
 
 import qrcode
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Qt, QLockFile, QUrl
-from PySide6.QtGui import QDesktopServices, QPainter, QPixmap, QIcon, QAction
+from PySide6.QtGui import QDesktopServices, QPainter, QPixmap, QIcon
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QSystemTrayIcon, QMenu, QPlainTextEdit,
+    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QPlainTextEdit,
 )
 
 from . import __version__, steam
@@ -137,7 +137,10 @@ class Window(QMainWindow):
         self.page_dirty = False
         self.quitting = False
         self.server = None
-        self.tray = None
+        self.close_requested = False
+        self.close_retry = QTimer(self)
+        self.close_retry.setSingleShot(True)
+        self.close_retry.timeout.connect(self.close)
         self.session_host = False
         self.sessions = {}
         self.last_session_work = time.monotonic()
@@ -286,22 +289,6 @@ class Window(QMainWindow):
         self.server = CommandServer(server_name(self.data), self)
         self.server.command.connect(self.handle_command)
         self.command_timer.start()
-        if QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray = QSystemTrayIcon(self.windowIcon(), self)
-            self.tray.setToolTip("UmeYc-SteamBack：后台监听中")
-            menu = QMenu(self)
-            show = menu.addAction("打开存档管理")
-            show.triggered.connect(self.show_window)
-            activity = menu.addAction("查看后台同步记录")
-            activity.triggered.connect(lambda: (self.show_window(), self.show_activity()))
-            self.update_action = menu.addAction("检查更新")
-            self.update_action.triggered.connect(lambda: (self.show_window(), self.check_for_updates()))
-            menu.addSeparator()
-            quit_action = menu.addAction("退出程序（停止监听）")
-            quit_action.triggered.connect(self.quit_app)
-            self.tray.setContextMenu(menu)
-            self.tray.activated.connect(lambda reason: self.show_window() if reason == QSystemTrayIcon.DoubleClick else None)
-            self.tray.show()
 
     def check_for_updates(self):
         # Separate worker pool and state: an unavailable GitHub connection must
@@ -436,8 +423,6 @@ class Window(QMainWindow):
                 self.update_status.setText(str(error))
                 return
             self.quitting = True
-            if self.tray:
-                self.tray.hide()
             QApplication.instance().quit()
         job.signals.done.connect(complete)
         self.update_pool.start(job)
@@ -460,30 +445,13 @@ class Window(QMainWindow):
         self.centralWidget().setUpdatesEnabled(False)
         self.monitor.setInterval(5000)
 
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        from PySide6.QtCore import QEvent
-        if event.type() == QEvent.WindowStateChange and self.isMinimized() and self.tray:
-            QTimer.singleShot(0, self.hide_window)
-
     def quit_app(self):
-        if self.update_downloading or self.installing_update:
-            self.show_window()
-            self.update_status.setText("正在下载或准备更新，请完成后再退出")
-            return
-        if self.busy or self.launch_requests:
-            self.show_window()
-            self.status.setText("正在同步存档，请完成后再退出；关闭窗口仍可在后台继续")
-            return
-        self.quitting = True
-        self.update_retry.stop()
-        self.monitor.stop()
-        self.command_timer.stop()
-        if self.tray:
-            self.tray.hide()
-        QApplication.instance().quit()
+        self.close()
 
     def handle_command(self, command, reply):
+        if self.close_requested:
+            reply({"ok": False, "error": "工具正在退出，请稍后重新启动游戏"})
+            return
         if self.installing_update:
             reply({"ok": False, "error": "工具正在更新，请完成后再启动游戏"})
             return
@@ -499,7 +467,7 @@ class Window(QMainWindow):
         self.process_launch_requests()
 
     def process_launch_requests(self):
-        if self.busy or not self.launch_requests:
+        if self.close_requested or self.busy or not self.launch_requests:
             return
         command, reply = self.launch_requests.pop(0)
         account, aid = command["account"], command["game_id"]
@@ -540,7 +508,7 @@ class Window(QMainWindow):
         self.task("正在执行 Steam 启动前云同步…", lambda: self.cloud.prepare_steam_launch(account, game), done, failed, quiet=True)
 
     def task(self, message, function, done=None, failed=None, quiet=False, lock_ui=True):
-        if self.busy or self.installing_update:
+        if self.close_requested or self.busy or self.installing_update:
             return
         self.busy = True
         if lock_ui:
@@ -1106,7 +1074,7 @@ class Window(QMainWindow):
         self.task("正在退出夸克…", self.cloud.client.logout, show)
 
     def monitor_games(self):
-        if self.busy or self.installing_update or self.launch_requests or not self.engine.account_ids:
+        if self.close_requested or self.busy or self.installing_update or self.launch_requests or not self.engine.account_ids:
             return
         account = self.engine.account
         self.maybe_exit_session()
@@ -1152,8 +1120,6 @@ class Window(QMainWindow):
         message = ("云端存在不同进度，已暂停补传，请手动选择同步方向" if conflict
                    else f"后台上传稍后重试：{error}")
         self.status.setText(message + "（详见后台记录）")
-        if self.tray:
-            self.tray.setToolTip("UmeYc-SteamBack：" + message)
 
     def maybe_exit_session(self):
         if (not self.session_host or self.busy or self.update_downloading or self.installing_update or self.launch_requests or self.sessions or self.cloud.running
@@ -1162,15 +1128,24 @@ class Window(QMainWindow):
         self.quit_app()
 
     def closeEvent(self, event):
-        if self.tray and not self.quitting:
-            self.hide_window()
+        self.close_requested = True
+        self.monitor.stop()
+        self.command_timer.stop()
+        self.update_retry.stop()
+        while self.launch_requests:
+            _, reply = self.launch_requests.pop(0)
+            reply({"ok": False, "error": "工具正在退出，请稍后重新启动游戏"})
+        if self.busy or self.update_downloading or self.installing_update:
+            self.status.setText("正在完成当前操作，完成后自动退出…")
+            self.close_retry.start(200)
             event.ignore()
             return
-        if self.busy or self.update_downloading or self.installing_update:
-            self.status.setText("正在处理存档，请等待当前操作完成后退出")
-            event.ignore()
-        else:
-            event.accept()
+        self.close_retry.stop()
+        self.quitting = True
+        if self.server:
+            self.server.server.close()
+        event.accept()
+        QApplication.instance().quit()
 
 
 def main():
@@ -1240,20 +1215,18 @@ def main():
             window.setup_background()
         except (ValueError, OSError) as error:
             window.error(error)
-    if "--background" in sys.argv and (window.tray or window.session_host):
+    if window.session_host:
         window.hide_window()
     else:
         window.show()
     if smoke_temp:
         window.monitor.stop()
         QTimer.singleShot(2000, app.quit)
-    app.setQuitOnLastWindowClosed(not bool(window.tray))
+    app.setQuitOnLastWindowClosed(not window.session_host)
     app.exec()
     window.update_pool.waitForDone()
     window.monitor.stop()
     window.command_timer.stop()
-    if window.tray:
-        window.tray.hide()
     lock.unlock()
     if smoke_temp:
         smoke_temp.cleanup()

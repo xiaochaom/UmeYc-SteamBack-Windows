@@ -57,7 +57,16 @@ def run_steam_wrapper(args, data, connect=None, start_host=None, run_game=None, 
         return process.wait()
     finally:
         try:
-            connect(name, {**command, "action": "finished"}, 2000)
+            finished = {**command, "action": "finished"}
+            result = connect(name, finished, 2000)
+            if result is None:
+                # The user may have closed the management window while the
+                # game was running. Wake a new host only for the exit upload.
+                start_host()
+                for _ in range(30):
+                    wait(.5)
+                    if connect(name, finished, 2000) is not None:
+                        break
         except (OSError, ValueError):
             pass  # The observer also detects game exits and retries uploads.
 
