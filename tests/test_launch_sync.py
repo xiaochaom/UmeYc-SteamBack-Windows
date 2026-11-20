@@ -1,4 +1,8 @@
 import pytest
+import copy
+import vdf
+from umeyc_steamback.engine import Config, Engine
+from umeyc_steamback.sync import WindowsCloud
 from umeyc_steamback.protocol.custom import write_json
 from tests.test_sync import setup
 
@@ -7,6 +11,9 @@ def test_disabled_launch_does_not_contact_quark(setup, monkeypatch):
     e, g, source, client, cloud = setup
     monkeypatch.setattr(client, "account", lambda: pytest.fail("disabled launch must be offline"))
     assert not cloud.prepare_game_launch(123, g)["synced"]
+    activity = cloud.read_state(cloud.activity_path)[cloud.key(123, g)]
+    assert activity["phase"] == "prelaunch"
+    assert activity["message"] == "启动前检查：启动前云同步未开启"
 
 
 def test_launch_download_new_cloud_after_previous_sync(setup):
@@ -92,6 +99,80 @@ def test_account_change_prevents_enabled_launch(setup):
     cloud.active_account = 124
     with pytest.raises(ValueError, match="账号已变化"):
         cloud.prepare_game_launch(123, g)
+
+
+def test_cached_quark_identity_cannot_silently_disable_launch_sync(setup):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    cloud.set_auto_sync(123, g, True)
+    cloud.uid = "cookie-alias"
+    result = cloud.prepare_steam_launch(123, g)
+    assert "本地与云端一致" in result["message"]
+    assert cloud.uid == client.user_id
+
+
+def test_changed_quark_account_does_not_use_another_accounts_configuration(setup):
+    e, g, source, client, cloud = setup
+    cloud.set_auto_sync(123, g, True)
+    before = cloud.read_state()
+    client.user_id = "another-account"
+    with pytest.raises(ValueError, match="账号已变化"):
+        cloud.prepare_steam_launch(123, g)
+    assert cloud.read_state() == before
+    assert (source / "slot.sav").read_bytes() == b"chapter one"
+
+
+def test_stale_identity_network_failure_is_reported_instead_of_skipping_sync(setup, monkeypatch):
+    from umeyc_steamback.protocol.quark import QuarkError
+    e, g, source, client, cloud = setup
+    cloud.set_auto_sync(123, g, True)
+    cloud.uid = "cookie-alias"
+    def offline():
+        raise QuarkError("请检查网络")
+    monkeypatch.setattr(client, "account", offline)
+    with pytest.raises(QuarkError, match="检查网络"):
+        cloud.prepare_steam_launch(123, g)
+    record = cloud.read_state(cloud.activity_path)[cloud.key(123, g)]
+    assert record["state"] == "error"
+    assert "检查网络" in record["message"]
+    assert (source / "slot.sav").read_bytes() == b"chapter one"
+
+
+@pytest.mark.parametrize("cached_identity", [None, "cookie-alias"])
+def test_independent_device_upload_is_pulled_by_restarted_launch_client(setup, tmp_path, cached_identity):
+    e, g, source, client, cloud = setup
+    cloud.upload(123, g)
+    device = tmp_path / "second-device"
+    destination = device / "saves"
+    destination.mkdir(parents=True)
+    other_engine = Engine(Config(str(device / "data"), str(device / "Steam")))
+    other_engine.account_ids = {123}
+    other_game = {**g, "install_root": str(device / "Steam")}
+    manifests = device / "Steam" / "steamapps"
+    manifests.mkdir(parents=True)
+    (manifests / "appmanifest_42.acf").write_text(vdf.dumps({"AppState": {"installdir": "Test"}}))
+    other_engine.configure(other_game, [str(destination)])
+    # Independent client/service/storage; only the simulated remote is shared.
+    other_client = copy.copy(client)
+    other_client.upload = client.upload
+    other_cloud = WindowsCloud(other_engine, other_client)
+    other_cloud.download_current(123, other_game)
+    other_cloud.set_auto_sync(123, other_game, True)
+    baseline = other_cloud.read_state()[other_cloud.key(123, other_game)]["synced_hash"]
+
+    (source / "slot.sav").write_bytes(b"chapter from another device")
+    remote = cloud.upload(123, g)["remote"]
+    assert remote["content_hash"] != baseline
+    assert (destination / "slot.sav").read_bytes() == b"chapter one"
+    restarted = WindowsCloud(other_engine, other_client)
+    if cached_identity:
+        restarted.uid = cached_identity
+    assert restarted.prepare_steam_launch(123, other_game)["synced"]
+    assert (destination / "slot.sav").read_bytes() == b"chapter from another device"
+    assert restarted.read_state()[restarted.key(123, other_game)]["synced_hash"] == remote["content_hash"]
+    assert any(b["source"] == "before_cloud_sync" for b in other_engine.backups(other_game))
+    record = restarted.read_state(restarted.activity_path)[restarted.key(123, other_game)]
+    assert record["synced"] and record["revision"] == remote["revision"]
 
 
 def test_unified_toggle_enables_both_and_migrates_partial_legacy_settings_off(setup):

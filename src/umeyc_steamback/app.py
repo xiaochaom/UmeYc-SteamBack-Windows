@@ -873,6 +873,9 @@ class Window(QMainWindow):
         dialog.resize(680, 400)
         layout = QVBoxLayout(dialog)
         records = read_json(self.upload_queue.activity)
+        for key, record in read_json(self.cloud.activity_path).items():
+            if record.get("time", 0) >= records.get(key, {}).get("time", 0):
+                records[key] = record
         view = QPlainTextEdit()
         view.setReadOnly(True)
         view.setPlainText("\n\n".join(f"{date(r['time'])} · {r['game_name']}\n{r['message']}"
