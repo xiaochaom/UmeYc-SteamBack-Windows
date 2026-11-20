@@ -1,0 +1,13 @@
+UmeYc-SteamBack-Windows
+Copyright (C) 2026 xiaochaom
+SPDX-License-Identifier: GPL-3.0-or-later
+
+src/umeyc_steamback/protocol/{cloud,quark,custom,sniff}.py are derived
+from xiaochaom/UmeYc-SteamBack commit abb57ae (GPL-3.0-or-later),
+itself based on geeksville/steamback by Kevin Hester and contributors.
+Windows adaptations include portable root mappings, Windows path checks,
+DPAPI cookie persistence, and Windows discovery/sniffing roots.
+
+PySide6 (Qt for Python): LGPL-3.0/GPL-3.0/commercial; dynamically linked.
+qrcode: BSD; vdf: MIT; psutil: BSD-3-Clause.
+Packaged dependencies retain their own license files. See LICENSE.

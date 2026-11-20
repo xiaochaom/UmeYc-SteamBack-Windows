@@ -1,0 +1,64 @@
+"""共用 Deck 发布协议，Windows 仅替换本地落盘过程。"""
+import json
+from pathlib import Path
+import shutil
+import tempfile
+import time
+import uuid
+
+from .protocol.cloud import CloudService, digest, unpack_verified
+from .protocol.custom import write_json
+
+
+class WindowsCloud(CloudService):
+    def upload(self, account, game, expected_revision=None, expected_uid=None):
+        self.isolated_engine(account).guard(game)
+        return super().upload(account, game, expected_revision, expected_uid)
+
+    def inspect(self, account, game, expected_revision=None):
+        with self.lock:
+            self.uid = self.client.account()["user_id"]
+            remote = self.latest(account, game)
+            if not remote:
+                raise ValueError("云端暂无存档，请先从另一台设备上传")
+            if expected_revision and remote["revision"] != expected_revision:
+                raise ValueError("云端版本已变化，请刷新后重试")
+            with tempfile.TemporaryDirectory() as temp:
+                archive = Path(temp) / "save.zip"
+                self.client.download(remote["archive_fid"], archive)
+                if digest(archive) != remote["archive_hash"]:
+                    raise ValueError("云存档压缩包校验失败")
+                manifest = unpack_verified(archive, Path(temp) / "files", game, account, remote["content_hash"])
+            return {"manifest": manifest, "remote": remote, "uid": self.uid}
+
+    def download(self, account, game, revision, expected_uid):
+        with self.lock:
+            self.uid = self.client.account()["user_id"]
+            if self.uid != expected_uid or self.active_account not in (None, account):
+                raise ValueError("账号已变化，请刷新后重试")
+            engine = self.isolated_engine(account)
+            engine.guard(game)
+            remote = self.latest(account, game)
+            if not remote or remote["revision"] != revision:
+                raise ValueError("云端版本已变化，请刷新后重新确认")
+            with tempfile.TemporaryDirectory(dir=engine.data) as temp:
+                archive = Path(temp) / "save.zip"
+                self.client.download(remote["archive_fid"], archive)
+                if digest(archive) != remote["archive_hash"]:
+                    raise ValueError("云存档校验失败，未覆盖游戏存档")
+                staging = Path(temp) / "files"
+                manifest = unpack_verified(archive, staging, game, account, remote["content_hash"])
+                plan = engine._custom_plan(game)
+                if plan["portable_keys"] != manifest["root_keys"] or plan["portable_mode"] != manifest["mode"]:
+                    raise ValueError("请先配置与云端对应的目录映射")
+                # Keep a persistent cloud-download record even if applying later fails.
+                folder = engine.backup_dir(game)
+                folder.mkdir(parents=True, exist_ok=True)
+                name = f"{int(time.time()*1000)}-{uuid.uuid4().hex}"
+                shutil.copy2(archive, folder / f"{name}.zip")
+                write_json(folder / f"{name}.json", {"id": name, "name": "", "source": "cloud_download",
+                           "time": int(time.time()*1000), "save_time": manifest["save_time"],
+                           "content_hash": manifest["content_hash"], "archive_hash": remote["archive_hash"]})
+                engine.apply(game, manifest, staging, "cloud_sync")
+                self.remember(account, game, manifest["content_hash"])
+            return {"message": "云端存档已同步到本地；下载记录及覆盖前备份已保留"}

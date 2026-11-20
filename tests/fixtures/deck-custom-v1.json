@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "game_id": 42,
+  "steam_account": "123",
+  "mode": "custom",
+  "root_keys": [
+    "custom-0"
+  ],
+  "files": [
+    {
+      "slot": 0,
+      "path": "profile/中文.sav",
+      "size": 10,
+      "mtime_ns": 1700000000000000000,
+      "sha256": "e9edb9be298865c9ffa822b522037a24d68b227962b77dd54a6e071d401cc822"
+    },
+    {
+      "slot": 0,
+      "path": "slot.sav",
+      "size": 28,
+      "mtime_ns": 1700000000000000000,
+      "sha256": "e0683d04a196b98afcf9bf372d4508fd284e3fcf984a1c0e43ceb4c122e96c2a"
+    }
+  ],
+  "save_time": 1700000000000,
+  "content_hash": "ddd981e52804c989becfc659259bc01b56ea9568d080faa403f804d76024884b"
+}

@@ -1,0 +1,57 @@
+name: Windows tests and portable build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Build portable app
+        if: matrix.python == '3.12'
+        run: >-
+          python -m PyInstaller --noconfirm --clean --windowed --onedir
+          --name UmeYc-SteamBack-Windows
+          --collect-data umeyc_steamback
+          --copy-metadata PySide6-Essentials --copy-metadata qrcode
+          --copy-metadata vdf --copy-metadata psutil
+          scripts/launch.py
+      - name: Smoke-test packaged Windows executable
+        if: matrix.python == '3.12'
+        shell: pwsh
+        run: |
+          $app = Start-Process dist/UmeYc-SteamBack-Windows/UmeYc-SteamBack-Windows.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $app.WaitForExit(30000)) { $app.Kill(); throw 'Packaged app timed out' }
+          if ($app.ExitCode -ne 0) { throw "Packaged app failed: $($app.ExitCode)" }
+      - name: Include documentation and licenses
+        if: matrix.python == '3.12'
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE,NOTICE,README.md dist/UmeYc-SteamBack-Windows/
+          Compress-Archive -Path dist/UmeYc-SteamBack-Windows -DestinationPath dist/UmeYc-SteamBack-Windows.zip
+          Get-FileHash dist/UmeYc-SteamBack-Windows.zip -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        if: matrix.python == '3.12'
+        with:
+          name: UmeYc-SteamBack-Windows-portable
+          path: |
+            dist/UmeYc-SteamBack-Windows.zip
+            dist/SHA256.txt
+          retention-days: 30
