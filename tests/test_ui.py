@@ -343,14 +343,15 @@ def test_launch_retry_reuses_result_and_late_exit_cannot_clear_new_session(tmp_p
 
 
 @pytest.mark.parametrize("exit_event", ["finished", "dead_owner"])
-def test_steam_tracking_background_host_does_not_block_exit_upload(tmp_path, monkeypatch, exit_event):
+@pytest.mark.parametrize("session_host", [True, False])
+def test_steam_tracking_background_host_does_not_block_exit_upload(tmp_path, monkeypatch, exit_event, session_host):
     import os
     import psutil
     monkeypatch.setattr(Window, "refresh", lambda _: None)
     monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
     w = Window(tmp_path / "data")
     w.monitor.stop()
-    w.session_host = True
+    w.session_host = session_host
     w.engine.account_ids = {123}
     w.cloud.uid = "uid"
     game = {"game_id": 42, "game_name": "测试", "install_root": str(tmp_path), "install_dir": "Test"}
@@ -394,7 +395,42 @@ def test_steam_tracking_background_host_does_not_block_exit_upload(tmp_path, mon
     quits = []
     monkeypatch.setattr(w, "quit_app", lambda: quits.append(True))
     w.maybe_exit_session()
-    assert quits == [True]
+    assert quits == ([True] if session_host else [])
+
+
+@pytest.mark.parametrize("exit_event", ["finished", "dead_owner"])
+def test_short_game_exit_is_persisted_before_management_becomes_idle(tmp_path, monkeypatch, exit_event):
+    from umeyc_steamback.background import UploadQueue
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.cloud.uid = "uid"
+    game = {"game_id": 42, "game_name": "测试"}
+    w.items = [game]
+    w.sessions[(123, 42)] = time.monotonic()
+    w.session_owners[(123, 42)] = {"session": "a" * 32}
+    monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"auto_upload": True, "synced_hash": "original-baseline"}})
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda *args, **kwargs: set())
+    monkeypatch.setattr(w, "task", lambda message, work, done, failed, **kwargs: done(work()))
+    assert w.upload_queue.previous is None
+    if exit_event == "finished":
+        def reply(result):
+            assert result == {"ok": True}
+            assert UploadQueue(w.data).pending  # The ack must follow disk persistence.
+        w.handle_command({"action": "finished", "account": 123, "game_id": 42, "session": "a" * 32}, reply)
+    else:
+        monkeypatch.setattr("umeyc_steamback.app.desktop.launch_owner_alive", lambda _: False)
+        w.monitor_games()
+    assert not w.sessions
+    assert not w.session_host
+    restored = UploadQueue(w.data)
+    pending = restored.next("uid", 123, set(), now=time.time() + 10)
+    assert pending["game"] == game and pending["base_hash"] == "original-baseline"
+    # Restart/retry cannot replace the original conflict baseline.
+    restored.enqueue("uid", 123, game, "later-cloud-baseline")
+    assert restored.pending["uid:123:42"]["base_hash"] == "original-baseline"
 
 
 def test_game_page_has_additive_launch_configuration_without_restore_action(tmp_path, monkeypatch):

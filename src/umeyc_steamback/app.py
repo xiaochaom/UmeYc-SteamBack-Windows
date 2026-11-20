@@ -440,6 +440,16 @@ class Window(QMainWindow):
     def quit_app(self):
         self.close()
 
+    def queue_game_exit(self, account, game):
+        if self.cloud.uid:
+            entry = self.cloud.read_state().get(self.cloud.key(account, game), {})
+            if entry.get("auto_upload"):
+                # Persist before clearing the session. An open management
+                # window stops idle polling when no session or pending work
+                # remains, and can be closed before the next monitor tick.
+                self.upload_queue.enqueue(self.cloud.uid, account, game, entry.get("synced_hash"))
+        self.engine.config.exited_wrapper_games |= {game["game_id"]}
+
     def handle_command(self, command, reply):
         if self.close_requested:
             reply({"ok": False, "error": "工具正在退出，请稍后重新启动游戏"})
@@ -479,15 +489,13 @@ class Window(QMainWindow):
                 if owner and owner.get("session") != command.get("session"):
                     reply({"ok": True})  # A late exit from an older session.
                     return
-                self.sessions.pop((account, aid), None)
-                self.session_owners.pop((account, aid), None)
                 # Steam also tracks this background host as a game child.
                 # After the wrapper reports exit, only real game processes
                 # can keep this game's upload waiting. Otherwise Steam and
                 # the host would wait indefinitely for each other to exit.
-                self.engine.config.exited_wrapper_games |= {aid}
-                if self.cloud.uid and self.cloud.read_state().get(self.cloud.key(account, game), {}).get("auto_upload"):
-                    self.upload_queue.previous = ((self.cloud.uid, account), {aid} | (self.upload_queue.previous or (None, set()))[1])
+                self.queue_game_exit(account, game)
+                self.sessions.pop((account, aid), None)
+                self.session_owners.pop((account, aid), None)
                 reply({"ok": True})
                 return
         except (ValueError, OSError) as error:
@@ -1105,8 +1113,11 @@ class Window(QMainWindow):
         # A killed wrapper cannot send its final message. Recover its exit
         # using PID/create-time ownership, while retaining real process checks.
         for key, owner in self.session_owners.items():
-            if key[0] == account and not desktop.launch_owner_alive(owner):
-                self.engine.config.exited_wrapper_games |= {key[1]}
+            if (key[0] == account and key[1] not in self.engine.config.exited_wrapper_games
+                    and not desktop.launch_owner_alive(owner)):
+                for game in items:
+                    if game["game_id"] == key[1]:
+                        self.queue_game_exit(account, game)
         ignored = self.engine.config.exited_wrapper_games
         def observe():
             desktop.check_steam_account(account)
