@@ -342,6 +342,61 @@ def test_launch_retry_reuses_result_and_late_exit_cannot_clear_new_session(tmp_p
     assert (123, 42) not in w.sessions and not w.session_owners
 
 
+@pytest.mark.parametrize("exit_event", ["finished", "dead_owner"])
+def test_steam_tracking_background_host_does_not_block_exit_upload(tmp_path, monkeypatch, exit_event):
+    import os
+    import psutil
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.session_host = True
+    w.engine.account_ids = {123}
+    w.cloud.uid = "uid"
+    game = {"game_id": 42, "game_name": "测试", "install_root": str(tmp_path), "install_dir": "Test"}
+    w.items = [game]
+    command = {"action": "finished", "account": 123, "game_id": 42,
+               "session": "a" * 32, "pid": os.getpid(), "started": psutil.Process().create_time()}
+    w.sessions[(123, 42)] = time.monotonic()
+    w.session_owners[(123, 42)] = command
+    monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"auto_upload": True}})
+    monkeypatch.setattr(w, "task", lambda message, work, done, failed, **kwargs: done(work()))
+    real_game_running = True
+    def running(items, ignore_registry_for=None):
+        ignored = {ignore_registry_for} if isinstance(ignore_registry_for, int) else set(ignore_registry_for or ())
+        # Steam's Running flag stays true while this host is tracked.
+        return {42} if real_game_running or 42 not in ignored else set()
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", running)
+    if exit_event == "finished":
+        replies = []
+        w.handle_command(command, replies.append)
+        assert replies == [{"ok": True}]
+    else:
+        monkeypatch.setattr("umeyc_steamback.app.desktop.launch_owner_alive", lambda _: False)
+        w.upload_queue.previous = (("uid", 123), {42})
+    uploads = []
+    monkeypatch.setattr(w.cloud, "upload_after_exit", lambda *args, **kwargs: uploads.append(args) or {})
+    monkeypatch.setattr(w, "synced", lambda _: None)
+    w.monitor_games()
+    assert w.cloud.running == {(123, 42)} and not uploads
+    with pytest.raises(ValueError, match="游戏正在运行"):
+        w.cloud.isolated_engine(123).guard(game)
+    real_game_running = False
+    w.monitor_games()
+    assert not w.cloud.running and not w.sessions
+    assert w.upload_queue.pending and not uploads
+    for pending in w.upload_queue.pending.values():
+        pending["due"] = time.time() - 1
+    w.monitor_games()
+    assert len(uploads) == 1 and not w.upload_queue.pending
+    w.cloud.isolated_engine(123).guard(game)
+    w.last_session_work = time.monotonic() - 60
+    quits = []
+    monkeypatch.setattr(w, "quit_app", lambda: quits.append(True))
+    w.maybe_exit_session()
+    assert quits == [True]
+
+
 def test_game_page_has_additive_launch_configuration_without_restore_action(tmp_path, monkeypatch):
     monkeypatch.setattr("umeyc_steamback.app.Window.refresh", lambda _: None)
     w = Window(tmp_path / "data")

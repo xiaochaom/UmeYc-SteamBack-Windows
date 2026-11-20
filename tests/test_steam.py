@@ -1,4 +1,7 @@
 import vdf
+import os
+import pytest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from umeyc_steamback import steam
 
@@ -37,3 +40,18 @@ def test_system_process_names_do_not_resolve_inside_game_working_directory(tmp_p
         SimpleNamespace(info={"exe": str(folder / "real-game.exe")}),
     ])
     assert steam.running_games([game], ignore_registry_for=42) == {42}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Steam registry")
+def test_only_exited_wrapped_games_ignore_registry_and_real_processes_still_block(tmp_path, monkeypatch):
+    import winreg
+    games = [{"game_id": aid, "install_root": str(tmp_path), "install_dir": str(aid)} for aid in (42, 43)]
+    monkeypatch.setattr(winreg, "OpenKey", lambda *args: nullcontext(None))
+    monkeypatch.setattr(winreg, "QueryValueEx", lambda *args: (1, winreg.REG_DWORD))
+    monkeypatch.setattr(steam.psutil, "process_iter", lambda *_: [])
+    assert steam.running_games(games, ignore_registry_for={42}) == {43}
+    assert steam.running_games(games) == {42, 43}
+    monkeypatch.setattr(steam.psutil, "process_iter", lambda *_: [
+        SimpleNamespace(info={"exe": str(steam.game_directory(games[0]) / "game.exe")}),
+    ])
+    assert steam.running_games(games, ignore_registry_for={42}) == {42, 43}

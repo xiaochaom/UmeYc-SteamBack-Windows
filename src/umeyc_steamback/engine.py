@@ -21,6 +21,7 @@ class Config:
     steam_dir: str
     prelaunch_game_id: int | None = None
     backup_root: str | None = None
+    exited_wrapper_games: frozenset[int] = frozenset()
 
 
 def read_json(path, default=None):
@@ -171,14 +172,15 @@ class Engine:
             return None
 
     def guard(self, game):
-        if self.config.prelaunch_game_id is not None and not game.get("install_dir"):
+        ignore_registry = self.config.prelaunch_game_id == game["game_id"] or game["game_id"] in self.config.exited_wrapper_games
+        if ignore_registry and not game.get("install_dir"):
             manifest = Path(game["install_root"]) / "steamapps" / f"appmanifest_{game['game_id']}.acf"
             install = steam.read_vdf(manifest).get("AppState", {}).get("installdir")
             if not install:
                 raise ValueError("无法确认游戏安装目录，请刷新 Steam 游戏列表后重试")
             game = {**game, "install_dir": install}
         if game["game_id"] in steam.running_games([game], **(
-                {"ignore_registry_for": self.config.prelaunch_game_id} if self.config.prelaunch_game_id is not None else {})):
+                {"ignore_registry_for": game["game_id"]} if ignore_registry else {})):
             raise ValueError("游戏正在运行，请退出游戏后操作存档")
 
     def backup_dir(self, game):

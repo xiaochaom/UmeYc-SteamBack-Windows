@@ -481,8 +481,11 @@ class Window(QMainWindow):
                     return
                 self.sessions.pop((account, aid), None)
                 self.session_owners.pop((account, aid), None)
-                # Registry can remain running until the wrapper exits. Let
-                # observe() wait for it to clear before scheduling the upload.
+                # Steam also tracks this background host as a game child.
+                # After the wrapper reports exit, only real game processes
+                # can keep this game's upload waiting. Otherwise Steam and
+                # the host would wait indefinitely for each other to exit.
+                self.engine.config.exited_wrapper_games |= {aid}
                 if self.cloud.uid and self.cloud.read_state().get(self.cloud.key(account, game), {}).get("auto_upload"):
                     self.upload_queue.previous = ((self.cloud.uid, account), {aid} | (self.upload_queue.previous or (None, set()))[1])
                 reply({"ok": True})
@@ -503,6 +506,7 @@ class Window(QMainWindow):
             self.sessions.pop((account, aid), None)
             self.session_owners.pop((account, aid), None)
         def done(result):
+            self.engine.config.exited_wrapper_games -= {aid}
             self.sessions[(account, aid)] = time.monotonic()
             if "session" in command:
                 self.session_owners[(account, aid)] = {k: command[k] for k in ("session", "pid", "started")}
@@ -1098,9 +1102,15 @@ class Window(QMainWindow):
         if not items:
             return
         uid = self.cloud.uid
+        # A killed wrapper cannot send its final message. Recover its exit
+        # using PID/create-time ownership, while retaining real process checks.
+        for key, owner in self.session_owners.items():
+            if key[0] == account and not desktop.launch_owner_alive(owner):
+                self.engine.config.exited_wrapper_games |= {key[1]}
+        ignored = self.engine.config.exited_wrapper_games
         def observe():
             desktop.check_steam_account(account)
-            running = steam.running_games(items)
+            running = steam.running_games(items, **({"ignore_registry_for": ignored} if ignored else {}))
             self.upload_queue.observe(uid, account, items, running, baselines={
                 g["game_id"]: state.get(self.cloud.key(account, g), {}).get("synced_hash") for g in items})
             return running, self.upload_queue.next(uid, account, running)

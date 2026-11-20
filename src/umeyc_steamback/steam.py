@@ -75,10 +75,12 @@ def game_directory(game):
 
 def running_games(items, ignore_registry_for=None):
     running = set()
+    ignored = ({ignore_registry_for} if isinstance(ignore_registry_for, int)
+               else set(ignore_registry_for or ()))
     if os.name == "nt":
         import winreg
         for g in items:
-            if g["game_id"] == ignore_registry_for:
+            if g["game_id"] in ignored:
                 continue
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"Software\Valve\Steam\Apps\{g['game_id']}") as key:

@@ -32,6 +32,22 @@ def setup(tmp_path, monkeypatch):
     return engine, game, source, client, cloud
 
 
+def test_exit_upload_ignores_host_registry_flag_but_still_guards_real_game(setup, monkeypatch):
+    e, g, source, client, cloud = setup
+    e.config.exited_wrapper_games = frozenset({42})
+    real_game_running = True
+    def running(items, ignore_registry_for=None):
+        return {42} if real_game_running or ignore_registry_for != 42 else set()
+    monkeypatch.setattr("umeyc_steamback.steam.running_games", running)
+    monkeypatch.setattr("umeyc_steamback.desktop.check_steam_account", lambda _: None)
+    with pytest.raises(ValueError, match="游戏正在运行"):
+        cloud.upload_after_exit(123, g, client.user_id, wait=lambda _: None)
+    assert not client.items
+    real_game_running = False
+    result = cloud.upload_after_exit(123, g, client.user_id, wait=lambda _: None)
+    assert result["game_id"] == 42 and cloud.latest(123, g)
+
+
 def test_cloud_roundtrip_protects_local_files_and_undo_removes_new_files(setup):
     e, g, source, client, cloud = setup
     (source / "new.sav").write_bytes(b"cloud new")
