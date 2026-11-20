@@ -182,3 +182,25 @@ def test_game_page_has_additive_launch_configuration_without_restore_action(tmp_
     assert "配置 Steam 启动项" in texts
     assert not any("恢复原启动项" in t or "复制原启动项" in t for t in texts)
     w.close()
+
+
+@pytest.mark.parametrize('choice,expected', [('关闭', []), ('使用本地存档上传', ['upload']), ('使用云端存档下载', ['download'])])
+def test_manual_sync_requires_explicit_direction_and_close_never_writes(tmp_path, monkeypatch, choice, expected):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QLabel
+    monkeypatch.setattr('umeyc_steamback.app.Window.refresh', lambda _: None)
+    w = Window(tmp_path / 'data')
+    w.monitor.stop()
+    events = []
+    monkeypatch.setattr(w, 'upload', lambda: events.append('upload'))
+    monkeypatch.setattr(w, 'download', lambda: events.append('download'))
+    def select():
+        dialog = _APPLICATION.activeModalWidget()
+        assert isinstance(dialog, QDialog)
+        assert any('本地存档时间：' in x.text() and '云端存档时间：' in x.text() for x in dialog.findChildren(QLabel))
+        assert not events
+        next(b for b in dialog.findChildren(QPushButton) if b.text() == choice).click()
+    QTimer.singleShot(0, select)
+    w.manual_sync_dialog({'game_id': 42}, 123, {'save_time': 1770000000000})
+    assert events == expected
+    w.close()

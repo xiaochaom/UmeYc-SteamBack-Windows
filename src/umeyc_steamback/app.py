@@ -771,7 +771,20 @@ class Window(QMainWindow):
         if not self.require_game():
             return
         game, account = dict(self.game), self.engine.account
-        remote = self.remote
+        def inspect():
+            self.cloud.isolated_engine(account).guard(game)
+            self.cloud.uid = self.cloud.client.account()["user_id"]
+            return self.cloud.latest(account, game), self.cloud.isolated_engine(account).save_time(game)
+        def show(result):
+            if self.engine.account != account or not self.game or self.game["game_id"] != game["game_id"]:
+                return
+            self.remote, local = result
+            self.local_times[(account, game["game_id"])] = local
+            self.render_times()
+            self.manual_sync_dialog(game, account, self.remote)
+        self.task("正在读取两端存档时间…", inspect, show)
+
+    def manual_sync_dialog(self, game, account, remote):
         dialog = QDialog(self)
         dialog.setWindowTitle("手动同步：选择要使用的存档")
         dialog.resize(520, 230)
