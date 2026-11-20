@@ -22,7 +22,6 @@ from .protocol.custom import write_json
 from .sync import WindowsCloud
 from .appinfo import cloud_support
 from . import desktop
-from .background import UploadQueue
 from .launch_options import LaunchOptions
 from .ipc import CommandServer, request, server_name
 
@@ -164,7 +163,7 @@ class Window(QMainWindow):
         self.auth = {}
         self.last_running = None
         self.pending_auto = []
-        self.upload_queue = UploadQueue(self.data)
+        self.upload_queue = self.cloud.retry_queue
         self.launch_options = LaunchOptions(self.engine)
         self.launch_requests = []
         self.background_mode = False
@@ -247,7 +246,10 @@ class Window(QMainWindow):
         page.addWidget(label("开启时配置 Steam 启动项；此后从 Steam 正常启动。后台运行自动上传，进度冲突时暂停并提示。"))
         row = QHBoxLayout()
         button("本地同步到云端", self.upload, row)
+        button("手动同步", self.manual_sync, row)
         button("云端同步到本地", self.download, row)
+        page.addLayout(row)
+        row = QHBoxLayout()
         button("刷新云端状态", self.refresh_cloud, row)
         page.addLayout(row)
         page.addWidget(label("云端每个账号、每个游戏只保留最新一份。覆盖前会确认并保留本地备份。"))
@@ -765,6 +767,24 @@ class Window(QMainWindow):
         button("关闭", dialog.accept, layout)
         dialog.exec()
 
+    def manual_sync(self):
+        if not self.require_game():
+            return
+        game, account = dict(self.game), self.engine.account
+        remote = self.remote
+        dialog = QDialog(self)
+        dialog.setWindowTitle("手动同步：选择要使用的存档")
+        dialog.resize(520, 230)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label(f"本地存档时间：{date(self.local_times.get((account, game['game_id'])))}\n云端存档时间：{date((remote or {}).get('save_time'))}\n请选择较新的进度。使用本地会上传并替换云端版本；使用云端会下载并覆盖当前配置路径。"))
+        row = QHBoxLayout()
+        use_local = button("使用本地存档上传", lambda: (dialog.accept(), self.upload()), row)
+        use_cloud = button("使用云端存档下载", lambda: (dialog.accept(), self.download()), row)
+        use_cloud.setEnabled(bool(remote))
+        button("关闭", dialog.reject, row)
+        layout.addLayout(row)
+        dialog.exec()
+
     def upload(self):
         if not self.require_game():
             return
@@ -927,7 +947,8 @@ class Window(QMainWindow):
         def observe():
             desktop.check_steam_account(account)
             running = steam.running_games(items)
-            self.upload_queue.observe(uid, account, items, running)
+            self.upload_queue.observe(uid, account, items, running, baselines={
+                g["game_id"]: state.get(self.cloud.key(account, g), {}).get("synced_hash") for g in items})
             return running, self.upload_queue.next(uid, account, running)
         def observed(result):
             running, pending = result
@@ -941,9 +962,9 @@ class Window(QMainWindow):
             if pending:
                 def upload():
                     try:
-                        result = self.cloud.upload_after_exit(account, pending["game"], uid)
+                        result = self.cloud.upload_after_exit(account, pending["game"], uid, base_hash=pending.get("base_hash"))
                     except Exception as error:
-                        self.upload_queue.finish(pending, error)
+                        self.upload_queue.finish(pending, error, conflict=isinstance(error, CloudConflict))
                         raise
                     self.upload_queue.finish(pending)
                     return result
@@ -952,13 +973,16 @@ class Window(QMainWindow):
         self.task("", observe, observed, lambda e: self.status.setText(str(e)), quiet=True)
 
     def background_error(self, error):
-        self.status.setText(f"后台上传稍后重试：{error}（详见后台记录）")
+        conflict = isinstance(error, CloudConflict)
+        message = ("云端存在不同进度，已暂停补传，请手动选择同步方向" if conflict
+                   else f"后台上传稍后重试：{error}")
+        self.status.setText(message + "（详见后台记录）")
         if self.tray:
-            self.tray.setToolTip("UmeYc-SteamBack：上传未完成，正在重试；右键查看记录")
+            self.tray.setToolTip("UmeYc-SteamBack：" + message)
 
     def maybe_exit_session(self):
         if (not self.session_host or self.busy or self.launch_requests or self.sessions or self.cloud.running
-                or self.upload_queue.pending or time.monotonic() - self.last_session_work < 20):
+                or any(not p.get("blocked") for p in self.upload_queue.pending.values()) or time.monotonic() - self.last_session_work < 20):
             return
         self.quit_app()
 

@@ -56,3 +56,18 @@ def test_multiple_games_wait_independently_and_disabled_games_do_not_queue(tmp_p
     assert queue.next("uid", 123, set(), now=46)["game"]["game_id"] == 43
     queue.observe("uid", 123, [GAME], set(), now=47)
     assert not queue.pending
+
+
+def test_conflict_suspends_retry_keeps_original_base_and_does_not_reappear_after_manual_clear(tmp_path):
+    queue = UploadQueue(tmp_path)
+    item = queue.enqueue('uid', 123, GAME, 'old-cloud', now=0)
+    queue.finish(item, ValueError('cloud changed'), conflict=True, now=10)
+    assert queue.next('uid', 123, set(), now=10**12) is None
+    restarted = UploadQueue(tmp_path)
+    restarted.enqueue('uid', 123, GAME, 'new-cloud', now=20)
+    saved = next(iter(restarted.pending.values()))
+    assert saved['base_hash'] == 'old-cloud'
+    assert saved['blocked']
+    restarted.clear('uid', 123, 42)
+    restarted.finish(item, ValueError('late worker'), now=30)
+    assert not UploadQueue(tmp_path).pending

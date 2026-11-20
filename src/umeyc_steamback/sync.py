@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import replace
 
-from .protocol.cloud import CloudService, digest, unpack_verified
+from .protocol.cloud import CloudService, CURRENT_BASELINE, digest, unpack_verified
 from .protocol.custom import write_json
 
 
@@ -34,7 +34,7 @@ class WindowsCloud(CloudService):
                 if was_running:
                     self.running.add((account, aid))
 
-    def upload_after_exit(self, account, game, uid, wait=None):
+    def upload_after_exit(self, account, game, uid, wait=None, base_hash=CURRENT_BASELINE):
         from .desktop import check_steam_account
         from .protocol.cloud import source_plan
         from .protocol.custom import safe_file
@@ -48,7 +48,7 @@ class WindowsCloud(CloudService):
             current = [(root, f, safe_file(root, f).stat().st_size, safe_file(root, f).stat().st_mtime_ns)
                        for root, suffix in info["save_games_roots"].items() for f in files[suffix]]
             if current and current == previous:
-                return self.upload(account, game, expected_uid=uid)
+                return self.upload(account, game, expected_uid=uid, base_hash=base_hash)
             previous = current
             wait(2)
         raise ValueError("存档仍在变化，已延后自动上传")
@@ -60,9 +60,9 @@ class WindowsCloud(CloudService):
         self.isolated_engine(account).guard(game)
         return self._prepare_launch(account, game["game_id"])
 
-    def upload(self, account, game, expected_revision=None, expected_uid=None):
+    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE):
         self.isolated_engine(account).guard(game)
-        return super().upload(account, game, expected_revision, expected_uid)
+        return super().upload(account, game, expected_revision, expected_uid, base_hash=base_hash)
 
     def inspect(self, account, game, expected_revision=None):
         with self.lock:

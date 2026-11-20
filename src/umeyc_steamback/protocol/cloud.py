@@ -15,7 +15,10 @@ import uuid
 from zipfile import ZipFile, ZIP_DEFLATED, BadZipFile
 
 from .custom import safe_file, write_json
+from .retry_queue import UploadQueue
 from .quark import QuarkClient, QuarkError, LoginExpired
+
+CURRENT_BASELINE = object()
 
 MAX_BYTES = 2 * 1024**3
 MAX_FILES = 50000
@@ -184,6 +187,8 @@ class CloudService:
         self.lock = threading.RLock()
         self.state_path = Path(engine.config.app_data_dir) / "cloud_settings.json"
         self.activity_path = Path(engine.config.app_data_dir) / "cloud_activity.json"
+        self.retry_queue = UploadQueue(Path(engine.config.app_data_dir))
+        self.retry_lock = threading.RLock()
         self.jobs = {}
         self.tasks = set()
         self.running = set()
@@ -303,6 +308,8 @@ class CloudService:
         state = self.read_state()
         state.setdefault(self.key(account, game), {})["synced_hash"] = content_hash
         write_json(self.state_path, state)
+        with self.retry_lock:
+            self.retry_queue.clear(self.uid, account, game["game_id"])
 
     def _prune_versions(self, account, game, folder, before, retained):
         """只清理同步前已存在的旧文件，保护其他设备正在上传的新文件。"""
@@ -366,7 +373,7 @@ class CloudService:
         except (ValueError, OSError, KeyError, TypeError):
             return warning
 
-    def upload(self, account, game, expected_revision=None, expected_uid=None):
+    def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE):
         with self.lock:
             auth = self.client.account(); self.uid = auth["user_id"]
             if expected_uid is not None and self.uid != expected_uid:
@@ -386,7 +393,10 @@ class CloudService:
                     self.remember(account, game, manifest["content_hash"])
                     warning = self._prune_versions(account, game, folder, before, remote)
                     return {"message": warning or "本地与云端存档内容一致，无需重复上传；云端仅保留最新一份"}
-                previous = self.read_state().get(self.key(account, game), {}).get("synced_hash")
+                previous = (self.read_state().get(self.key(account, game), {}).get("synced_hash")
+                            if base_hash is CURRENT_BASELINE else base_hash)
+                if base_hash is not CURRENT_BASELINE and previous is not None and remote is None:
+                    raise CloudConflict({"revision": None, "save_time": None})
                 if remote and remote["content_hash"] != previous and expected_revision != remote["revision"]:
                     raise CloudConflict(remote)
                 if expected_revision is not None and (remote or {}).get("revision") != expected_revision:
@@ -424,6 +434,9 @@ class CloudService:
                 auto_sync=enabled, auto_download=enabled, auto_upload=enabled,
                 game={k: game[k] for k in ("game_id", "game_name", "install_root")})
             write_json(self.state_path, state)
+            if not enabled:
+                with self.retry_lock:
+                    self.retry_queue.clear(self.uid, account, game["game_id"])
             return enabled
 
     def set_auto_download(self, account, game, enabled):
