@@ -35,7 +35,7 @@ def test_install_is_idempotent_and_restores_exact_original_options(manager):
     assert path.read_bytes() == before
     manager.update(123, 42, restore=True)
     assert manager.read(123, 42)[5] == old
-    assert vdf.loads(path.read_text())["other"] == "preserve"
+    assert vdf.loads(path.read_text(encoding="utf-8"))["other"] == "preserve"
     assert list((manager.engine.data / "steam_config_backups").glob("*.vdf"))
 
 
@@ -64,7 +64,7 @@ def test_running_steam_rejects_direct_write_without_closing_it(manager, monkeypa
 
 def test_preserve_existing_wrapper_and_refuse_external_changes(manager):
     manager, path = manager
-    path.write_text(path.read_text().replace('-dx12 --profile \\"中文 玩家\\"', 'existing %command% -arg'), encoding="utf-8")
+    path.write_text(path.read_text(encoding="utf-8").replace('-dx12 --profile \\"中文 玩家\\"', 'existing %command% -arg'), encoding="utf-8")
     # Use the metadata reader to ensure edits are serialized with VDF escaping.
     _, _, tree, node, field, *_ = manager.read(123, 42)
     del node[field]
@@ -73,7 +73,7 @@ def test_preserve_existing_wrapper_and_refuse_external_changes(manager):
     old, generated = manager.preview(123, 42)
     assert generated.endswith(old)
     manager.update(123, 42)
-    path.write_text(path.read_text().replace('-flag', '-edited'), encoding="utf-8")
+    path.write_text(path.read_text(encoding="utf-8").replace('-flag', '-edited'), encoding="utf-8")
     before = path.read_bytes()
     with pytest.raises(ValueError, match="停止恢复"):
         manager.update(123, 42, restore=True)

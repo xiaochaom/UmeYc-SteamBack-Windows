@@ -1,4 +1,5 @@
 import vdf
+from types import SimpleNamespace
 from umeyc_steamback import steam
 
 
@@ -20,3 +21,19 @@ def test_multiple_libraries_and_account_id32(tmp_path):
 def test_missing_steam_is_empty(tmp_path):
     assert steam.accounts(tmp_path) == []
     assert steam.games(tmp_path) == []
+
+
+def test_system_process_names_do_not_resolve_inside_game_working_directory(tmp_path, monkeypatch):
+    game = {"game_id": 42, "install_root": str(tmp_path), "install_dir": "Test"}
+    folder = steam.game_directory(game) / "Game"
+    folder.mkdir(parents=True)
+    monkeypatch.chdir(folder)
+    monkeypatch.setattr(steam.psutil, "process_iter", lambda *_: [
+        SimpleNamespace(info={"exe": "Registry"}),
+        SimpleNamespace(info={"exe": "MemCompression"}),
+    ])
+    assert steam.running_games([game], ignore_registry_for=42) == set()
+    monkeypatch.setattr(steam.psutil, "process_iter", lambda *_: [
+        SimpleNamespace(info={"exe": str(folder / "real-game.exe")}),
+    ])
+    assert steam.running_games([game], ignore_registry_for=42) == {42}

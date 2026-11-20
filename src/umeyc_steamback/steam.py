@@ -91,7 +91,13 @@ def running_games(items, ignore_registry_for=None):
         try:
             exe = process.info["exe"]
             if exe:
-                path = Path(exe).resolve()
+                path = Path(exe)
+                # Windows pseudo-processes can report names such as Registry
+                # or MemCompression. Resolving those against Steam's game cwd
+                # would turn them into false evidence of a running game.
+                if not path.is_absolute():
+                    continue
+                path = path.resolve()
                 running.update(aid for aid, root in roots if root in path.parents)
         except (psutil.Error, OSError):
             continue
