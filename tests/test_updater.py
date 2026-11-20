@@ -138,6 +138,7 @@ def test_apply_waits_exits_replaces_whole_runtime_and_preserves_data(staged, mon
     restarted = []
     refreshed = []
     monkeypatch.setattr("umeyc_steamback.desktop.refresh_executable_icon", lambda exe: refreshed.append(exe))
+    monkeypatch.setattr(psutil, "process_iter", lambda *args, **kwargs: pytest.fail("Update must not scan running games or wrappers"))
     def restart(exe):
         assert not u.update_in_progress(data)
         assert refreshed == [target / u.EXE]

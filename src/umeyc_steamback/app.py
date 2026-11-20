@@ -24,7 +24,7 @@ from . import desktop
 from .launch_options import LaunchOptions
 from .ipc import CommandServer, request, server_name
 from .updates import check_updates
-from .updater import download_update, launch_update, update_in_progress, cleanup_updates, check_other_processes, can_self_update
+from .updater import download_update, launch_update, update_in_progress, cleanup_updates, can_self_update
 
 
 def date(value):
@@ -367,33 +367,23 @@ class Window(QMainWindow):
             self.update_retry.start(1000)
             return
         try:
-            games = {g["game_id"]: g for g in self.items}
-            if self.engine.account_ids:
-                for game in self.engine.configured_games():
-                    games.setdefault(game["game_id"], game)
-            # Cached sessions/running flags can survive disabling monitoring
-            # or a killed Steam wrapper. Only fresh process/Steam evidence
-            # may block an explicitly requested update.
-            running = steam.running_games(list(games.values()))
-            if running:
-                names = "、".join(games.get(aid, {}).get("game_name", str(aid)) for aid in sorted(running))
-                self.update_status.setText(f"更新已就绪，检测到游戏仍在运行：{names}。退出后将自动重启更新。")
-                self.update_retry.start(2000)
-                return
-            check_other_processes(desktop.app_directory())
-        except (OSError, ValueError) as error:
-            self.update_status.setText(f"暂未更新：{error}；稍后将重新检查")
-            self.update_retry.start(2000)
-            return
-        try:
             if self.engine.account_ids and self.cloud.uid:
                 account = self.engine.account
                 state = self.cloud.read_state()
-                enabled = [g for g in games.values() if state.get(self.cloud.key(account, g), {}).get("auto_upload")]
-                # Persist an exit observed just before updating. Pending work
-                # survives the restart; never discard the final upload intent.
-                self.upload_queue.observe(self.cloud.uid, account, enabled, set(), baselines={
-                    g["game_id"]: state.get(self.cloud.key(account, g), {}).get("synced_hash") for g in enabled})
+                games = {g["game_id"]: g for g in self.items}
+                for game in self.engine.configured_games():
+                    games.setdefault(game["game_id"], game)
+                identity, previous = self.upload_queue.previous or (None, set())
+                tracked = set(previous) if identity == (self.cloud.uid, account) else set()
+                tracked.update(aid for acc, aid in self.sessions if acc == account)
+                tracked.update(aid for acc, aid in self.cloud.running if acc == account)
+                # Save upload intent without querying or waiting for games.
+                # On restart the queue's normal guard postpones live-game work.
+                for aid in tracked:
+                    game = games.get(aid)
+                    entry = state.get(self.cloud.key(account, game), {}) if game else {}
+                    if entry.get("auto_upload"):
+                        self.upload_queue.enqueue(self.cloud.uid, account, game, entry.get("synced_hash"))
         except (OSError, ValueError) as error:
             self.update_status.setText(f"无法保存待同步状态：{error}，请处理后重试更新")
             return

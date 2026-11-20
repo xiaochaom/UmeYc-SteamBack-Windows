@@ -232,17 +232,6 @@ def _remove(path):
         path.unlink(missing_ok=True)
 
 
-def check_other_processes(target):
-    exe = str((Path(target) / EXE).resolve()).casefold()
-    for process in psutil.process_iter(["pid", "exe"]):
-        try:
-            if (process.pid != os.getpid() and process.info["exe"]
-                    and str(Path(process.info["exe"]).resolve()).casefold() == exe):
-                raise ValueError("还有游戏同步入口正在运行，请退出游戏并等待上传结束后更新")
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-
 def apply_update(plan_path, executable=None, restart=None):
     """Runs from the downloaded build, so its own runtime stays outside target."""
     plan_path = Path(plan_path).resolve()
@@ -280,7 +269,6 @@ def apply_update(plan_path, executable=None, restart=None):
             for name in reversed(old):
                 os.replace(rollback / name, target / name)
         try:
-            check_other_processes(target)
             for name in sorted(APP_FILES):
                 path = safe_file(target, name)
                 if path.exists():

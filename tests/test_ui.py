@@ -550,8 +550,8 @@ def test_in_app_update_downloads_then_hands_off_and_exits_only_when_ready(tmp_pa
     assert calls == ["download", "handoff", "quit"]
 
 
-@pytest.mark.parametrize("active", ["save_task", "steam_game", "launch_queue"])
-def test_ready_update_waits_for_games_and_sync_without_quitting(tmp_path, monkeypatch, active):
+@pytest.mark.parametrize("active", ["save_task", "launch_queue"])
+def test_ready_update_waits_only_for_active_save_work_without_quitting(tmp_path, monkeypatch, active):
     from umeyc_steamback.updater import PreparedUpdate
     monkeypatch.setattr(Window, "refresh", lambda _: None)
     monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: {42} if active == "steam_game" else set())
@@ -563,7 +563,7 @@ def test_ready_update_waits_for_games_and_sync_without_quitting(tmp_path, monkey
     if active == "launch_queue": w.launch_requests.append(({}, lambda _: None))
     w.install_prepared_update()
     assert not w.installing_update and not w.quitting
-    assert ("游戏仍在运行" if active == "steam_game" else "等待当前存档操作") in w.update_status.text()
+    assert "等待当前存档操作" in w.update_status.text()
     assert w.update_retry.isActive()
     w.busy = False
 
@@ -573,7 +573,6 @@ def test_stale_game_cache_cannot_block_restart_update(tmp_path, monkeypatch, cac
     from umeyc_steamback.updater import PreparedUpdate
     monkeypatch.setattr(Window, "refresh", lambda _: None)
     monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
-    monkeypatch.setattr("umeyc_steamback.app.check_other_processes", lambda _: None)
     w = Window(tmp_path / "data")
     w.monitor.stop()
     w.prepared_update = PreparedUpdate("0.2.0", tmp_path / "work", tmp_path / "payload")
@@ -592,7 +591,6 @@ def test_restart_update_resumes_without_a_second_click_after_save_work_finishes(
     from umeyc_steamback.updater import PreparedUpdate
     monkeypatch.setattr(Window, "refresh", lambda _: None)
     monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
-    monkeypatch.setattr("umeyc_steamback.app.check_other_processes", lambda _: None)
     w = Window(tmp_path / "data")
     w.monitor.stop()
     w.prepared_update = PreparedUpdate("0.2.0", tmp_path / "work", tmp_path / "payload")
@@ -610,20 +608,28 @@ def test_restart_update_resumes_without_a_second_click_after_save_work_finishes(
     assert not w.update_retry.isActive()
 
 
-def test_update_detects_configured_game_even_when_not_in_visible_list(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", ["Wallpaper Engine", "正在运行的游戏"])
+def test_restart_update_never_queries_or_waits_for_running_games(tmp_path, monkeypatch, name):
     from umeyc_steamback.updater import PreparedUpdate
     monkeypatch.setattr(Window, "refresh", lambda _: None)
     w = Window(tmp_path / "data")
     w.monitor.stop()
     w.engine.account_ids = {123}
-    game = {"game_id": 42, "game_name": "正在运行的游戏"}
+    game = {"game_id": 42, "game_name": name}
+    w.items = [game]
     monkeypatch.setattr(w.engine, "configured_games", lambda: [game])
-    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda games: {g["game_id"] for g in games})
-    monkeypatch.setattr("umeyc_steamback.app.launch_update", lambda *_: pytest.fail("game still running"))
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games",
+                        lambda _: pytest.fail("Updating must not inspect running games"))
+    w.sessions[(123, 42)] = time.monotonic()
+    w.cloud.running = {(123, 42)}
+    calls = []
+    monkeypatch.setattr("umeyc_steamback.app.launch_update", lambda *_: calls.append("handoff"))
+    monkeypatch.setattr(QApplication, "quit", lambda *args: calls.append("quit"))
     w.prepared_update = PreparedUpdate("0.2.0", tmp_path / "work", tmp_path / "payload")
     w.install_prepared_update()
-    assert not w.installing_update and w.update_retry.isActive()
-    assert "正在运行的游戏" in w.update_status.text()
+    finish_update_jobs(w)
+    assert calls == ["handoff", "quit"]
+    assert w.quitting and not w.update_retry.isActive()
 
 
 def test_update_persists_just_exited_game_upload_intent_before_clearing_cache(tmp_path, monkeypatch):
@@ -631,7 +637,6 @@ def test_update_persists_just_exited_game_upload_intent_before_clearing_cache(tm
     from umeyc_steamback.protocol.retry_queue import UploadQueue
     monkeypatch.setattr(Window, "refresh", lambda _: None)
     monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
-    monkeypatch.setattr("umeyc_steamback.app.check_other_processes", lambda _: None)
     w = Window(tmp_path / "data")
     w.monitor.stop()
     w.engine.account_ids = {123}
