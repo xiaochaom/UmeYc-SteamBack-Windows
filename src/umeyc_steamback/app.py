@@ -539,13 +539,15 @@ class Window(QMainWindow):
             reply({"ok": False, "error": text})
         self.task("正在执行 Steam 启动前云同步…", lambda: self.cloud.prepare_steam_launch(account, game), done, failed, quiet=True)
 
-    def task(self, message, function, done=None, failed=None, quiet=False):
+    def task(self, message, function, done=None, failed=None, quiet=False, lock_ui=True):
         if self.busy or self.installing_update:
             return
         self.busy = True
-        self.header.setEnabled(False)
-        self.splitter.setEnabled(False)
-        self.progress.setVisible(not quiet)
+        if lock_ui:
+            self.header.setEnabled(False)
+            self.splitter.setEnabled(False)
+        if not quiet:
+            self.progress.show()
         if not quiet:
             self.status.setText(message)
         job = Job(function)
@@ -553,9 +555,11 @@ class Window(QMainWindow):
 
         def complete(value, error):
             self.busy = False
-            self.header.setEnabled(True)
-            self.splitter.setEnabled(True)
-            self.progress.hide()
+            if lock_ui:
+                self.header.setEnabled(True)
+                self.splitter.setEnabled(True)
+            if not quiet:
+                self.progress.hide()
             if error:
                 if failed:
                     failed(error)
@@ -725,9 +729,12 @@ class Window(QMainWindow):
                 self.render_times()
         def read_local():
             if not self.background_mode and not self.busy and QApplication.activeModalWidget() is None:
-                self.task("", lambda: self.cloud.isolated_engine(account).save_time(selected_game), update_local, quiet=True)
+                self.task("", lambda: self.cloud.isolated_engine(account).save_time(selected_game), update_local,
+                          quiet=True, lock_ui=False)
         QTimer.singleShot(0, read_local)
+        self.auto_sync.blockSignals(True)
         self.auto_sync.setChecked(self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_sync", False))
+        self.auto_sync.blockSignals(False)
         self.records.setRowCount(len(records))
         sources = {"manual": "手动备份", "cloud_download": "云端下载", "before_cloud_sync": "同步前本地备份", "before_restore": "恢复前本地备份"}
         for i, record in enumerate(records):
@@ -1115,6 +1122,8 @@ class Window(QMainWindow):
                 g["game_id"]: state.get(self.cloud.key(account, g), {}).get("synced_hash") for g in items})
             return running, self.upload_queue.next(uid, account, running)
         def observed(result):
+            if self.engine.account != account or self.cloud.uid != uid:
+                return
             running, pending = result
             self.cloud.running = {(account, aid) for aid in running}
             now = time.monotonic()
@@ -1134,7 +1143,9 @@ class Window(QMainWindow):
                     return result
                 self.task("正在后台上传云存档…", upload, self.synced,
                           lambda e: self.background_error(e), quiet=True)
-        self.task("", observe, observed, lambda e: self.status.setText(str(e)), quiet=True)
+        # Read-only polling must not gray out and re-enable every control on
+        # each timer tick. Actual uploads still serialize and lock the UI.
+        self.task("", observe, observed, lambda e: self.status.setText(str(e)), quiet=True, lock_ui=False)
 
     def background_error(self, error):
         conflict = isinstance(error, CloudConflict)

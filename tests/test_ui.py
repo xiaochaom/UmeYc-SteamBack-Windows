@@ -44,6 +44,59 @@ def drain(app, window, timeout=5):
     assert not window.busy
 
 
+def test_auto_sync_idle_polling_never_disables_the_window(tmp_path, monkeypatch):
+    from PySide6.QtCore import QObject, QEvent
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.cloud.uid = "uid"
+    w.game = {"game_id": 42, "game_name": "测试"}
+    w.items = [w.game]
+    monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"auto_upload": True}})
+    monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
+    monkeypatch.setattr(w.upload_queue, "observe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(w.upload_queue, "next", lambda *args: None)
+    changes = []
+    class Watcher(QObject):
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.EnabledChange:
+                changes.append(obj.isEnabled())
+            return False
+    watcher = Watcher()
+    w.header.installEventFilter(watcher)
+    w.splitter.installEventFilter(watcher)
+    w.status.setText("自动云同步已开启")
+    for _ in range(3):
+        w.monitor_games()
+        assert w.header.isEnabled() and w.splitter.isEnabled()
+        drain(_APPLICATION, w)
+    assert changes == []
+    assert w.status.text() == "自动云同步已开启"
+    # A real save write still prevents concurrent edits.
+    w.task("正在上传…", lambda: None)
+    assert not w.header.isEnabled() and not w.splitter.isEnabled()
+    drain(_APPLICATION, w)
+    assert w.header.isEnabled() and w.splitter.isEnabled()
+
+
+def test_rendering_auto_sync_checkbox_does_not_write_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.cloud.uid = "uid"
+    w.game = {"game_id": 42, "game_name": "测试"}
+    monkeypatch.setattr(w.cloud, "read_state", lambda: {"uid:123:42": {"auto_sync": True}})
+    monkeypatch.setattr(w, "task", lambda *args, **kwargs: None)
+    signals = []
+    w.auto_sync.toggled.connect(signals.append)
+    w.render_game()
+    assert w.auto_sync.isChecked()
+    assert signals == []
+
+
 def test_window_worker_and_record_save_only_closes_record_dialog(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "saves"
