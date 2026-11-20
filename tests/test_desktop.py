@@ -1,6 +1,5 @@
 import ctypes
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from umeyc_steamback import desktop
@@ -21,7 +20,7 @@ def test_refresh_icon_once_retries_failure_and_handles_upgrade_or_move(tmp_path,
     moved = tmp_path / "新目录/UmeYc-SteamBack-Windows.exe"
     desktop.refresh_icon_once(data, moved, "0.1.8")
     assert calls == [executable, executable, moved]
-    assert json.loads((data / "shell-icon.json").read_text()) == {
+    assert json.loads((data / "shell-icon.json").read_text(encoding="utf-8")) == {
         "version": "0.1.8", "executable": str(moved.resolve())}
 
 
