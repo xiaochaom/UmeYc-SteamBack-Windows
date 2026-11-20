@@ -147,6 +147,9 @@ class Window(QMainWindow):
         self.installing_update = False
         self.update_info = None
         self.prepared_update = None
+        self.update_retry = QTimer(self)
+        self.update_retry.setSingleShot(True)
+        self.update_retry.timeout.connect(self.install_prepared_update)
         self.update_url = None
         self.update_action = None
         self.update_job = None
@@ -370,17 +373,46 @@ class Window(QMainWindow):
         self.update_pool.start(job)
 
     def install_prepared_update(self):
-        if self.installing_update or not self.prepared_update:
+        if self.installing_update or self.quitting or not self.prepared_update:
             return
-        if (self.busy or self.launch_requests or self.sessions or self.cloud.running
-                or steam.running_games(self.items)):
-            self.update_status.setText("更新已下载并校验；请退出游戏、等待存档同步完成后点“重启并更新”")
+        if self.busy or self.launch_requests:
+            self.update_status.setText("更新已就绪，正在等待当前存档操作完成，随后自动重启更新…")
+            self.update_retry.start(1000)
             return
         try:
+            games = {g["game_id"]: g for g in self.items}
+            if self.engine.account_ids:
+                for game in self.engine.configured_games():
+                    games.setdefault(game["game_id"], game)
+            # Cached sessions/running flags can survive disabling monitoring
+            # or a killed Steam wrapper. Only fresh process/Steam evidence
+            # may block an explicitly requested update.
+            running = steam.running_games(list(games.values()))
+            if running:
+                names = "、".join(games.get(aid, {}).get("game_name", str(aid)) for aid in sorted(running))
+                self.update_status.setText(f"更新已就绪，检测到游戏仍在运行：{names}。退出后将自动重启更新。")
+                self.update_retry.start(2000)
+                return
             check_other_processes(desktop.app_directory())
-        except ValueError as error:
-            self.update_status.setText(str(error))
+        except (OSError, ValueError) as error:
+            self.update_status.setText(f"暂未更新：{error}；稍后将重新检查")
+            self.update_retry.start(2000)
             return
+        try:
+            if self.engine.account_ids and self.cloud.uid:
+                account = self.engine.account
+                state = self.cloud.read_state()
+                enabled = [g for g in games.values() if state.get(self.cloud.key(account, g), {}).get("auto_upload")]
+                # Persist an exit observed just before updating. Pending work
+                # survives the restart; never discard the final upload intent.
+                self.upload_queue.observe(self.cloud.uid, account, enabled, set(), baselines={
+                    g["game_id"]: state.get(self.cloud.key(account, g), {}).get("synced_hash") for g in enabled})
+        except (OSError, ValueError) as error:
+            self.update_status.setText(f"无法保存待同步状态：{error}，请处理后重试更新")
+            return
+        self.update_retry.stop()
+        self.sessions.clear()
+        self.cloud.running.clear()
         self.installing_update = True
         self.monitor.stop()
         self.command_timer.stop()
@@ -444,6 +476,7 @@ class Window(QMainWindow):
             self.status.setText("正在同步存档，请完成后再退出；关闭窗口仍可在后台继续")
             return
         self.quitting = True
+        self.update_retry.stop()
         self.monitor.stop()
         self.command_timer.stop()
         if self.tray:
