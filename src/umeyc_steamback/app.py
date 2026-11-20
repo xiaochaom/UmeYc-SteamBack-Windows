@@ -1143,6 +1143,12 @@ class Window(QMainWindow):
         self.quit_app()
 
     def closeEvent(self, event):
+        if self.quitting:
+            # QApplication.quit() closes top-level windows first. Once the
+            # updater is ready, installing_update must not veto that close.
+            self.close_retry.stop()
+            event.accept()
+            return
         self.close_requested = True
         self.monitor.stop()
         self.command_timer.stop()
