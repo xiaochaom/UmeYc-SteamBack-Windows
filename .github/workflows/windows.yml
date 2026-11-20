@@ -50,6 +50,11 @@ jobs:
           Compress-Archive -Path dist/UmeYc-SteamBack-Windows -DestinationPath dist/UmeYc-SteamBack-Windows.zip
           $hash = Get-FileHash dist/UmeYc-SteamBack-Windows.zip -Algorithm SHA256
           "$($hash.Hash.ToLower())  UmeYc-SteamBack-Windows.zip" | Set-Content -Encoding ascii dist/SHA256.txt
+      - name: Verify packaged in-app update and restart
+        if: matrix.python == '3.12'
+        run: python scripts/smoke_update.py dist/UmeYc-SteamBack-Windows dist/UmeYc-SteamBack-Windows.zip
+        env:
+          QT_QPA_PLATFORM: offscreen
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'
         with:

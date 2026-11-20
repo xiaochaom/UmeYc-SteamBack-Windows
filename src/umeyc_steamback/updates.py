@@ -24,6 +24,7 @@ class UpdateResult:
     version: str
     available: bool
     url: str
+    package_size: int | None = None
 
 
 def parse_release(release, current=__version__):
@@ -34,18 +35,19 @@ def parse_release(release, current=__version__):
         raise ValueError("更新信息不完整")
     remote_version = version_number(tag)
     available = remote_version > version_number(current)
+    package_size = None
     if available:
         assets = release.get("assets", [])
-        if not isinstance(assets, list) or not any(
+        packages = [a for a in assets if (
             isinstance(a, dict) and a.get("name") == "UmeYc-SteamBack-Windows.zip"
-            and a.get("state") == "uploaded" and isinstance(a.get("size"), int) and a["size"] > 0
-            for a in assets
-        ):
+            and a.get("state") == "uploaded" and type(a.get("size")) is int and a["size"] > 0
+        )] if isinstance(assets, list) else []
+        if len(packages) != 1:
             raise ValueError("新版安装包尚未就绪，请稍后重试")
-    # Build the destination from the known repository rather than opening an
-    # arbitrary URL returned by the API. Updates are downloaded by the user.
+        package_size = packages[0]["size"]
+    # Construct release and asset URLs from the known repository and tag.
     return UpdateResult(".".join(str(p) for p in remote_version), available,
-                        REPOSITORY_URL + "/releases/tag/" + tag)
+                        REPOSITORY_URL + "/releases/tag/" + tag, package_size)
 
 
 def check_updates(current=__version__):

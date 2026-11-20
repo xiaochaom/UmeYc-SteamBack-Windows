@@ -8,7 +8,7 @@ Windows 游戏存档管理工具，通过夸克网盘与 [UmeYc-SteamBack Steam 
 
 - 中文界面，识别 Steam 多个游戏库与账号；可以手动填写 Steam App ID。
 - 隐藏 Proton、GE-Proton、Steam Linux Runtime 兼容层，其余游戏统一按名称排列，不区分 Steam 云支持情况。
-- 每次程序启动时在独立后台任务中检查 GitHub 正式版本；发现新版显示下载入口，也可手动检查。更新失败不影响存档同步或游戏启动，后台不弹窗。
+- 每次程序启动时在独立后台任务中检查 GitHub 正式版本，也可手动检查。点击“下载并更新”在应用内下载、校验并重启替换；游戏或同步未结束时保留已下载的包，等空闲后点“重启并更新”。更新失败不影响存档同步，后台不弹窗。
 - 夸克 App 扫码登录，夸克和 Steam 账号栏只显示昵称。Windows 会话使用当前用户 DPAPI 加密。
 - 候选路径识别、手动选择存档文件/目录、游戏保存前后的文件变化嗅探；无需游戏支持 Steam 云。
 - 手动备份到本地，可重命名、恢复、删除。备份持续保留，没有固定或滚动删除机制。
@@ -25,7 +25,9 @@ Windows 游戏存档管理工具，通过夸克网盘与 [UmeYc-SteamBack Steam 
 打开仓库 [Releases](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/releases/latest)，
 下载 `UmeYc-SteamBack-Windows.zip`，解压并保持完整目录结构，运行
 `UmeYc-SteamBack-Windows.exe`。不需要安装 Python；`SHA256.txt` 可用于校验下载文件。
-程序未签名。发现新版后点击“下载新版”打开正式发布页，完整解压新版本；替换程序前请等待同步完成并退出工具。配置、登录信息和备份都放在程序旁的 `data`、`backups` 文件夹，升级时请保留这两个文件夹；移动程序时一起移动。保留原程序路径可继续使用已配置的 Steam 启动项。主分支及功能分支构建同时在 [Actions](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/actions)
+程序未签名。从 v0.1.4 开始，发现新版后点“下载并更新”，会显示下载进度，校验 SHA-256 后退出旧版、替换程序并重启；配置、登录信息及 `backups` 保留，替换失败会恢复旧程序。更新期间暂停新的游戏同步入口，已有游戏或同步任务未结束时会提示稍后重启更新。v0.1.3 及更早版本仍需手动下载并完整解压覆盖一次；之后即可使用应用内更新。
+
+配置、登录信息和备份都放在程序旁的 `data`、`backups` 文件夹，手动升级时请保留这两个文件夹；移动程序时一起移动。保留原程序路径可继续使用已配置的 Steam 启动项。主分支及功能分支构建同时在 [Actions](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/actions)
 提供 30 天有效的调试制品。只有推送版本标签才会在所有 Windows 检查通过后发布 Release。
 
 源码运行（Python 3.11/3.12）：
@@ -104,6 +106,6 @@ Windows 的真实 Steam 启动项、反作弊及启动后脱离父进程的第�
 .venv\Scripts\python -m umeyc_steamback --smoke-test
 ```
 
-测试使用隔离目录和模拟网盘，不修改真实游戏存档。含 Deck v1.4.5 原始代码生成的格式兼容 fixture、同步冲突、失败保留旧版、恢复回滚、Windows 路径防护、界面重命名弹窗回归。Windows CI 额外验证 DPAPI、目录联接防护及打包 EXE 启动。扫码登录、真实夸克传输和实际游戏互通需要设备联调确认。
+测试使用隔离目录和模拟网盘，不修改真实游戏存档。含 Deck v1.4.5 原始代码生成的格式兼容 fixture、同步冲突、失败保留旧版、恢复回滚、Windows 路径防护、界面重命名弹窗回归，以及更新包校验、解压防护、替换回滚和保留数据。Windows CI 额外验证 DPAPI、目录联接防护、打包 EXE 启动及真实打包更新进程替换并重启。扫码登录、真实夸克传输和实际游戏互通需要设备联调确认。
 
 GPL-3.0-or-later，来源及依赖许可见 [NOTICE](NOTICE) 与 [LICENSE](LICENSE)。提交身份为 xiaochaom。

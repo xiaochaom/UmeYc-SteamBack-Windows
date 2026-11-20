@@ -12,6 +12,7 @@ def parse_args(argv):
     parser.add_argument("--background", action="store_true")
     parser.add_argument("--session-host", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--apply-update")
     parser.add_argument("--steam-launch", action="store_true")
     parser.add_argument("--account", type=int)
     parser.add_argument("--game-id", type=int)
@@ -63,12 +64,31 @@ def run_steam_wrapper(args, data, connect=None, start_host=None, run_game=None, 
 
 def main():
     args = parse_args(sys.argv[1:])
+    if args.apply_update:
+        from .updater import apply_update
+        try:
+            return 0 if apply_update(args.apply_update, executable=sys.executable) else 1
+        except Exception:
+            import traceback
+            from pathlib import Path
+            try:
+                (Path(args.apply_update).parent / "error.log").write_text(traceback.format_exc(), encoding="utf-8")
+            except OSError:
+                pass
+            if os.name == "nt":
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(None, "更新未完成，请重新打开工具。若程序无法启动，请保留 data 和 backups，重新解压正式安装包；旧程序文件保留在 data\\updates 的 rollback 目录。",
+                                                "UmeYc-SteamBack 更新", 0x10)
+            return 1
     if not args.steam_launch:
         from .app import main as gui_main
         return gui_main()
     from PySide6.QtCore import QCoreApplication
     core = QCoreApplication.instance() or QCoreApplication(sys.argv)
     try:
+        from .updater import update_in_progress
+        if update_in_progress(data_directory()):
+            raise ValueError("工具正在更新，请完成后再启动游戏")
         return run_steam_wrapper(args, data_directory())
     except Exception as error:
         text = str(error) if isinstance(error, (OSError, ValueError)) else "同步启动失败，请打开工具检查"

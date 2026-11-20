@@ -24,6 +24,7 @@ from . import desktop
 from .launch_options import LaunchOptions
 from .ipc import CommandServer, request, server_name
 from .updates import check_updates
+from .updater import download_update, launch_update, update_in_progress, cleanup_updates, check_other_processes, can_self_update
 
 
 def date(value):
@@ -53,6 +54,7 @@ def button(text, callback, layout):
 
 class Result(QObject):
     done = Signal(object, object)
+    progress = Signal(int, int)
 
 
 class Job(QRunnable):
@@ -141,6 +143,10 @@ class Window(QMainWindow):
         self.last_session_work = time.monotonic()
         self.local_times = {}
         self.update_busy = False
+        self.update_downloading = False
+        self.installing_update = False
+        self.update_info = None
+        self.prepared_update = None
         self.update_url = None
         self.update_action = None
         self.update_job = None
@@ -174,7 +180,7 @@ class Window(QMainWindow):
         self.update_status = label(f"当前版本：{__version__}")
         update_row.addWidget(self.update_status, 1)
         self.check_update_button = button("检查更新", self.check_for_updates, update_row)
-        self.download_update_button = button("下载新版", self.open_update, update_row)
+        self.download_update_button = button("下载并更新", self.open_update, update_row)
         self.download_update_button.hide()
         layout.addLayout(update_row)
         self.splitter = QSplitter()
@@ -297,26 +303,29 @@ class Window(QMainWindow):
     def check_for_updates(self):
         # Separate worker pool and state: an unavailable GitHub connection must
         # never occupy the serialized game-save/sync task or block launch IPC.
-        if self.update_busy or self.quitting:
+        if self.update_busy or self.update_downloading or self.installing_update or self.quitting:
             return
         self.update_busy = True
         self.check_update_button.setEnabled(False)
+        self.download_update_button.setEnabled(False)
         self.update_status.setText(f"当前版本：{__version__} · 正在检查更新…")
         job = Job(check_updates)
         self.update_job = job
         def complete(result, error):
             self.update_busy = False
             self.check_update_button.setEnabled(True)
+            self.download_update_button.setEnabled(True)
             if error:
                 message = str(error) if isinstance(error, ValueError) else "检查更新失败，请稍后重试"
                 self.update_status.setText(f"当前版本：{__version__} · {message}")
                 return  # Keep any previously discovered download available.
             self.update_url = result.url if result.available else None
+            self.update_info = result if result.available else None
             self.download_update_button.setVisible(result.available)
             self.update_status.setText(f"当前版本：{__version__} · 发现新版 {result.version}" if result.available
                                        else f"当前版本：{__version__} · 已是最新版本")
             if self.update_action:
-                self.update_action.setText(f"下载新版 {result.version}" if result.available else "检查更新")
+                self.update_action.setText(f"下载并更新 {result.version}" if result.available else "检查更新")
                 self.update_action.triggered.disconnect()
                 self.update_action.triggered.connect(self.open_update if result.available else
                     lambda: (self.show_window(), self.check_for_updates()))
@@ -324,9 +333,82 @@ class Window(QMainWindow):
         self.update_pool.start(job)
 
     def open_update(self):
-        if self.update_url:
-            if not QDesktopServices.openUrl(QUrl(self.update_url)):
-                self.update_status.setText("无法打开发布页，请稍后重试")
+        self.show_window()
+        if self.update_busy or self.update_downloading or self.installing_update or self.quitting:
+            return
+        if self.prepared_update:
+            self.install_prepared_update()
+            return
+        if not self.update_info:
+            return
+        if not can_self_update():
+            self.update_status.setText("应用内更新仅支持 Windows 打包版本；源码运行请使用 Git 更新")
+            return
+        result = self.update_info
+        self.update_downloading = True
+        self.check_update_button.setEnabled(False)
+        self.download_update_button.setEnabled(False)
+        self.update_status.setText(f"正在下载 {result.version}，完成后将重启更新…")
+        job = Job(lambda: download_update(result, self.data, job.signals.progress.emit))
+        self.update_job = job
+        def progress(received, total):
+            detail = f"{received * 100 // total}%" if total else f"{received // 1024**2} MB"
+            self.update_status.setText(f"正在下载 {result.version}：{detail}（下载后校验）")
+        def complete(prepared, error):
+            self.update_downloading = False
+            self.check_update_button.setEnabled(True)
+            self.download_update_button.setEnabled(True)
+            if error:
+                message = str(error) if isinstance(error, (ValueError, OSError)) else "下载更新失败，请重试"
+                self.update_status.setText(message)
+                return
+            self.prepared_update = prepared
+            self.download_update_button.setText("重启并更新")
+            self.install_prepared_update()
+        job.signals.progress.connect(progress)
+        job.signals.done.connect(complete)
+        self.update_pool.start(job)
+
+    def install_prepared_update(self):
+        if self.installing_update or not self.prepared_update:
+            return
+        if (self.busy or self.launch_requests or self.sessions or self.cloud.running
+                or steam.running_games(self.items)):
+            self.update_status.setText("更新已下载并校验；请退出游戏、等待存档同步完成后点“重启并更新”")
+            return
+        try:
+            check_other_processes(desktop.app_directory())
+        except ValueError as error:
+            self.update_status.setText(str(error))
+            return
+        self.installing_update = True
+        self.monitor.stop()
+        self.command_timer.stop()
+        self.header.setEnabled(False)
+        self.splitter.setEnabled(False)
+        self.check_update_button.setEnabled(False)
+        self.download_update_button.setEnabled(False)
+        self.update_status.setText("正在准备重启更新，配置和备份将保留…")
+        job = Job(lambda: launch_update(self.prepared_update, desktop.app_directory()))
+        self.update_job = job
+        def complete(_, error):
+            if error:
+                self.installing_update = False
+                self.monitor.start()
+                if self.server:
+                    self.command_timer.start()
+                self.header.setEnabled(True)
+                self.splitter.setEnabled(True)
+                self.check_update_button.setEnabled(True)
+                self.download_update_button.setEnabled(True)
+                self.update_status.setText(str(error))
+                return
+            self.quitting = True
+            if self.tray:
+                self.tray.hide()
+            QApplication.instance().quit()
+        job.signals.done.connect(complete)
+        self.update_pool.start(job)
 
     def show_window(self):
         self.session_host = False  # Explicitly opened management stays available.
@@ -353,6 +435,10 @@ class Window(QMainWindow):
             QTimer.singleShot(0, self.hide_window)
 
     def quit_app(self):
+        if self.update_downloading or self.installing_update:
+            self.show_window()
+            self.update_status.setText("正在下载或准备更新，请完成后再退出")
+            return
         if self.busy or self.launch_requests:
             self.show_window()
             self.status.setText("正在同步存档，请完成后再退出；关闭窗口仍可在后台继续")
@@ -365,6 +451,9 @@ class Window(QMainWindow):
         QApplication.instance().quit()
 
     def handle_command(self, command, reply):
+        if self.installing_update:
+            reply({"ok": False, "error": "工具正在更新，请完成后再启动游戏"})
+            return
         if command["action"] == "show":
             self.show_window()
             self.check_for_updates()
@@ -418,7 +507,7 @@ class Window(QMainWindow):
         self.task("正在执行 Steam 启动前云同步…", lambda: self.cloud.prepare_steam_launch(account, game), done, failed, quiet=True)
 
     def task(self, message, function, done=None, failed=None, quiet=False):
-        if self.busy:
+        if self.busy or self.installing_update:
             return
         self.busy = True
         self.header.setEnabled(False)
@@ -955,7 +1044,7 @@ class Window(QMainWindow):
         self.task("正在退出夸克…", self.cloud.client.logout, show)
 
     def monitor_games(self):
-        if self.busy or self.launch_requests or not self.engine.account_ids:
+        if self.busy or self.installing_update or self.launch_requests or not self.engine.account_ids:
             return
         account = self.engine.account
         self.maybe_exit_session()
@@ -1001,7 +1090,7 @@ class Window(QMainWindow):
             self.tray.setToolTip("UmeYc-SteamBack：" + message)
 
     def maybe_exit_session(self):
-        if (not self.session_host or self.busy or self.launch_requests or self.sessions or self.cloud.running
+        if (not self.session_host or self.busy or self.update_downloading or self.installing_update or self.launch_requests or self.sessions or self.cloud.running
                 or any(not p.get("blocked") for p in self.upload_queue.pending.values()) or time.monotonic() - self.last_session_work < 20):
             return
         self.quit_app()
@@ -1011,7 +1100,7 @@ class Window(QMainWindow):
             self.hide_window()
             event.ignore()
             return
-        if self.busy:
+        if self.busy or self.update_downloading or self.installing_update:
             self.status.setText("正在处理存档，请等待当前操作完成后退出")
             event.ignore()
         else:
@@ -1035,6 +1124,9 @@ def main():
     else:
         from .storage import data_directory
         data = data_directory()
+    if update_in_progress(data):
+        QMessageBox.information(None, "正在更新", "工具正在替换程序文件，请等待更新完成后再打开。")
+        return 1
     try:
         data.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -1067,6 +1159,12 @@ def main():
     window = Window(data, backup_root=backup_root)
     window.session_host = "--session-host" in sys.argv
     if not smoke_temp:
+        result_file = data / "updates/result.json"
+        result = read_json(result_file)
+        result_file.unlink(missing_ok=True)
+        if result and not result.get("ok"):
+            QTimer.singleShot(0, lambda: window.error(ValueError("更新未完成，已恢复旧版程序；配置和备份未修改，请重试更新。")))
+        QTimer.singleShot(5000, lambda: cleanup_updates(data))
         QTimer.singleShot(0, window.check_for_updates)
         try:
             window.launch_options.recover()
@@ -1082,6 +1180,7 @@ def main():
         QTimer.singleShot(2000, app.quit)
     app.setQuitOnLastWindowClosed(not bool(window.tray))
     app.exec()
+    window.update_pool.waitForDone()
     window.monitor.stop()
     window.command_timer.stop()
     if window.tray:

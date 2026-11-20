@@ -22,6 +22,7 @@ def cleanup_qt_windows():
     _APPLICATION.processEvents()
     for widget in _APPLICATION.topLevelWidgets():
         if isinstance(widget, Window):
+            assert widget.update_pool.waitForDone(5000)
             widget.monitor.stop()
             widget.command_timer.stop()
             widget.quitting = True
@@ -242,10 +243,7 @@ def test_update_check_does_not_occupy_sync_worker_or_popup_when_hidden(tmp_path,
     assert not w.update_busy and not w.isVisible()
     assert _APPLICATION.activeModalWidget() is None
     assert '0.2.0' in w.update_status.text()
-    opened = []
-    monkeypatch.setattr(QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()) or True)
-    w.open_update()
-    assert opened == [w.update_url]
+    assert w.download_update_button.text() == '下载并更新'
     w.close()
 
 
@@ -354,3 +352,106 @@ def test_executable_icon_has_small_and_large_cloud_save_images():
     assert not icon.isNull()
     assert {16, 32, 48, 256} <= {size.width() for size in icon.availableSizes()}
     assert not icon.pixmap(256, 256).isNull()
+
+
+def finish_update_jobs(window):
+    for _ in range(4):
+        assert window.update_pool.waitForDone(5000)
+        _APPLICATION.processEvents()
+
+
+def test_in_app_update_downloads_then_hands_off_and_exits_only_when_ready(tmp_path, monkeypatch):
+    from umeyc_steamback.updates import UpdateResult
+    from umeyc_steamback.updater import PreparedUpdate
+    import threading
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.can_self_update", lambda: True)
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.update_info = UpdateResult("0.2.0", True, "https://github.com/example")
+    prepared = PreparedUpdate("0.2.0", tmp_path / "data/updates/work", tmp_path / "payload")
+    calls, entered, release = [], threading.Event(), threading.Event()
+    def download(result, data, progress):
+        assert result is w.update_info and data == w.data
+        progress(1, 2)
+        calls.append("download")
+        return prepared
+    def handoff(package, target):
+        assert package == prepared
+        calls.append("handoff")
+        entered.set()
+        assert release.wait(4)
+    monkeypatch.setattr("umeyc_steamback.app.download_update", download)
+    monkeypatch.setattr("umeyc_steamback.app.launch_update", handoff)
+    monkeypatch.setattr(QApplication, "quit", lambda *args: calls.append("quit"))
+    try:
+        w.open_update()
+        assert w.update_pool.waitForDone(1000)
+        _APPLICATION.processEvents()
+        assert entered.wait(1)
+        assert calls == ["download", "handoff"]
+        assert w.installing_update and not w.monitor.isActive()
+        replies = []
+        w.handle_command({"action": "prepare", "account": 123, "game_id": 42}, replies.append)
+        assert not replies[0]["ok"] and "更新" in replies[0]["error"]
+        w.task("", lambda: pytest.fail("update must block new save work"))
+    finally:
+        release.set()
+        finish_update_jobs(w)
+    assert calls == ["download", "handoff", "quit"]
+
+
+@pytest.mark.parametrize("active", ["save_task", "game_session", "cloud_game", "steam_game", "launch_queue"])
+def test_ready_update_waits_for_games_and_sync_without_quitting(tmp_path, monkeypatch, active):
+    from umeyc_steamback.updater import PreparedUpdate
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: {42} if active == "steam_game" else set())
+    monkeypatch.setattr("umeyc_steamback.app.launch_update", lambda *_: pytest.fail("must wait"))
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.prepared_update = PreparedUpdate("0.2.0", tmp_path / "work", tmp_path / "payload")
+    if active == "save_task": w.busy = True
+    if active == "game_session": w.sessions[(123, 42)] = 1
+    if active == "cloud_game": w.cloud.running.add((123, 42))
+    if active == "launch_queue": w.launch_requests.append(({}, lambda _: None))
+    w.install_prepared_update()
+    assert not w.installing_update and not w.quitting
+    assert "等待存档同步" in w.update_status.text()
+    w.busy = False
+
+
+def test_update_handoff_failure_keeps_old_ui_usable(tmp_path, monkeypatch):
+    from umeyc_steamback.updater import PreparedUpdate
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.steam.running_games", lambda _: set())
+    def fail(*_):
+        raise ValueError("更新进程未能启动")
+    monkeypatch.setattr("umeyc_steamback.app.launch_update", fail)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.prepared_update = PreparedUpdate("0.2.0", tmp_path / "work", tmp_path / "payload")
+    w.install_prepared_update()
+    finish_update_jobs(w)
+    assert not w.installing_update and not w.quitting
+    assert w.header.isEnabled() and w.splitter.isEnabled()
+    assert "未能启动" in w.update_status.text()
+
+
+def test_update_download_error_does_not_affect_save_worker(tmp_path, monkeypatch):
+    from umeyc_steamback.updates import UpdateResult
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.can_self_update", lambda: True)
+    def fail(*_):
+        raise ValueError("更新包校验失败")
+    monkeypatch.setattr("umeyc_steamback.app.download_update", fail)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.update_info = UpdateResult("0.2.0", True, "https://github.com/example")
+    w.status.setText("存档同步中")
+    w.open_update()
+    finish_update_jobs(w)
+    assert not w.update_downloading and not w.installing_update
+    assert w.check_update_button.isEnabled() and w.download_update_button.isEnabled()
+    assert w.status.text() == "存档同步中" and "校验失败" in w.update_status.text()
+    assert not w.prepared_update
