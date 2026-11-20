@@ -99,3 +99,5 @@ Windows 的真实 Steam 启动项、反作弊及启动后脱离父进程的第�
 测试使用隔离目录和模拟网盘，不修改真实游戏存档。含 Deck v1.4.5 原始代码生成的格式兼容 fixture、同步冲突、失败保留旧版、恢复回滚、Windows 路径防护、界面重命名弹窗回归。Windows CI 额外验证 DPAPI、目录联接防护及打包 EXE 启动。扫码登录、真实夸克传输和实际游戏互通需要设备联调确认。
 
 GPL-3.0-or-later，来源及依赖许可见 [NOTICE](NOTICE) 与 [LICENSE](LICENSE)。提交身份为 xiaochaom。
+
+游戏列表按 Steam 元数据 `common/category/category_23`（Steam 云功能标记）分组。内部 UFS 配额、存档路径和隐藏云配置不代表游戏已支持 Steam 云，因此不用于分组；这不影响插件查找存档或夸克同步。

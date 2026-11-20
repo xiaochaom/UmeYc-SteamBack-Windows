@@ -5,7 +5,7 @@ from umeyc_steamback.appinfo import cloud_support
 from umeyc_steamback.steam import is_compatibility_tool
 
 
-def fixture(version):
+def fixture(version, apps=None):
     strings = []
     def string(value):
         return value.encode() + b"\0"
@@ -22,8 +22,11 @@ def fixture(version):
             result += encode(value) if isinstance(value, dict) else string(str(value))
         return result + b"\x08"
     payload = b""
-    for aid, category in [(42, {"category_23": "1"}), (43, {"category_2": "1"})]:
-        body = encode({"appinfo": {"common": {"name": str(aid), "category": category}}})
+    if apps is None:
+        apps = {42: {"common": {"name": "Cloud", "category": {"category_23": "1"}}},
+                43: {"common": {"name": "Local", "category": {"category_2": "1"}}}}
+    for aid, app in apps.items():
+        body = encode({"appinfo": app})
         header = bytes(60 if version >= 0x28 else 40)
         payload += struct.pack("<II", aid, len(header)+len(body)) + header + body
     payload += bytes(4)
@@ -52,3 +55,23 @@ def test_compatibility_tools_are_hidden(name):
 @pytest.mark.parametrize("name", ["Proton Pulse", "明末：渊虚之羽", "SteamWorld Dig", "Portal 2"])
 def test_real_games_are_preserved(name):
     assert not is_compatibility_tool(name)
+
+
+def regression_apps():
+    return {
+        374320: {"common": {"name": "DARK SOULS III", "category": {"category_2": 1}},
+                 "ufs": {"quota": "100000000000", "maxnumfiles": 10000, "hidecloudui": 1,
+                         "ignoreexternalfiles": 1, "savefiles": {"0": {
+                             "root": "WinAppDataRoaming", "path": "DarkSoulsIII", "pattern": "*.sl2"}}}},
+        570940: {"common": {"name": "DARK SOULS REMASTERED", "category": {"category_2": 1}},
+                 "ufs": {"quota": 167772160, "savefiles": {"0": {"pattern": "*.sl2"}}}},
+        814380: {"common": {"name": "Sekiro", "category": {"category_23": 1}}},
+    }
+
+
+@pytest.mark.parametrize('version', [0x27, 0x28, 0x29])
+def test_unused_ufs_configuration_does_not_advertise_steam_cloud(tmp_path, version):
+    (tmp_path / 'appcache').mkdir()
+    (tmp_path / 'appcache/appinfo.vdf').write_bytes(fixture(version, regression_apps()))
+    assert cloud_support(tmp_path, [374320, 570940, 814380, 99]) == {
+        '374320': False, '570940': False, '814380': True}

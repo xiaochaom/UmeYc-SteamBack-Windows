@@ -91,11 +91,11 @@ def cloud_support(steam_root, app_ids):
                         app = keyvalues(io.BytesIO(read_exact(stream, length-header)), strings).get("appinfo", {})
                         common = app.get("common", {})
                         categories = common.get("category", {})
-                        ufs = app.get("ufs", {})
                         if common.get("name"):
-                            found[str(app_id)] = (str(categories.get("category_23", "0")) == "1"
-                                                 or int(ufs.get("quota", 0)) > 0
-                                                 or bool(ufs.get("savefiles")))
+                            # UFS also contains hidden/unused cloud configuration
+                            # (e.g. DARK SOULS III). Only the advertised Steam
+                            # Cloud category indicates support for grouping.
+                            found[str(app_id)] = str(categories.get("category_23", "0")) == "1"
                     except (ValueError, IndexError, TypeError, AttributeError):
                         pass
                 stream.seek(end)
