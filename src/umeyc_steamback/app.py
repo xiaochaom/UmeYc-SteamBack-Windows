@@ -680,8 +680,10 @@ class Window(QMainWindow):
         self.choose_game(self.games_list.currentItem())
 
     def choose_game(self, item, previous=None):
-        self.game = item.data(Qt.UserRole) if item else None
-        self.remote = None
+        game = item.data(Qt.UserRole) if item else None
+        if (game or {}).get("game_id") != (self.game or {}).get("game_id"):
+            self.remote = None
+        self.game = game
         self.render_game()
 
     def require_game(self):
@@ -958,8 +960,11 @@ class Window(QMainWindow):
 
     def synced(self, result):
         self.status.setText(result["message"])
-        self.remote = None
-        self.render_game()
+        if (self.game and result.get("game_id") == self.game["game_id"]
+                and result.get("account") == self.engine.account
+                and result.get("uid") == self.cloud.uid):
+            self.remote = result["remote"]
+            self.render_game()
 
     def download(self):
         if not self.require_game():
@@ -1087,6 +1092,7 @@ class Window(QMainWindow):
         def show(result):
             self.auth = result
             self.cloud.uid = None
+            self.remote = None
             self.update_auth()
             self.render_game()
             self.status.setText("已退出夸克，云端与本地备份均保留")

@@ -397,7 +397,8 @@ class CloudService:
                 if remote and remote["content_hash"] == manifest["content_hash"]:
                     self.remember(account, game, manifest["content_hash"])
                     warning = self._prune_versions(account, game, folder, before, remote)
-                    return {"message": warning or "本地与云端存档内容一致，无需重复上传；云端仅保留最新一份"}
+                    return {"message": warning or "本地与云端存档内容一致，无需重复上传；云端仅保留最新一份",
+                            "remote": remote}
                 previous = (self.read_state().get(self.key(account, game), {}).get("synced_hash")
                             if base_hash is CURRENT_BASELINE else base_hash)
                 if base_hash is not CURRENT_BASELINE and previous is not None and remote is None:
@@ -426,7 +427,7 @@ class CloudService:
                 self.remember(account, game, manifest["content_hash"])
                 record["revision"] = published["fid"]
                 warning = self._prune_versions(account, game, folder, before, record)
-                return {"message": warning or "本地存档已上传，云端仅保留最新一份"}
+                return {"message": warning or "本地存档已上传，云端仅保留最新一份", "remote": record}
 
 
     def set_auto_sync(self, account, game, enabled):

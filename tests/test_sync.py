@@ -86,6 +86,23 @@ def test_upload_retains_one_pair_and_preserves_unknown_files(setup):
     assert not e.backups(g)
 
 
+def test_sync_results_include_published_times_without_an_extra_cloud_read(setup):
+    e, g, source, client, cloud = setup
+    uploaded = cloud.upload(123, g)
+    remote = cloud.latest(123, g)
+    assert uploaded["remote"] == remote
+    assert remote["save_time"] == 1700000000000
+    assert remote["uploaded_at"] > remote["save_time"]
+    # Repeating a sync must show the retained cloud time, not invent a new
+    # upload time just because the button was clicked again.
+    unchanged = cloud.upload(123, g)
+    assert unchanged["remote"] == remote
+    downloaded = cloud.download(123, g, remote["revision"], client.user_id)
+    assert downloaded["remote"] == remote
+    for result in (uploaded, unchanged, downloaded):
+        assert (result["uid"], result["account"], result["game_id"]) == (client.user_id, 123, 42)
+
+
 def test_failed_publish_preserves_old_cloud(setup):
     e, g, source, client, cloud = setup
     cloud.upload(123, g)

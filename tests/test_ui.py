@@ -353,6 +353,46 @@ def test_executable_icon_has_small_and_large_cloud_save_images():
     assert not icon.pixmap(256, 256).isNull()
 
 
+@pytest.mark.parametrize("background", [False, True])
+def test_completed_sync_keeps_cloud_save_and_upload_times(tmp_path, monkeypatch, background):
+    from umeyc_steamback.app import date
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.game = {"game_id": 42, "game_name": "测试"}
+    w.items = [w.game]
+    w.cloud.uid = "uid"
+    monkeypatch.setattr(w, "task", lambda *args, **kwargs: None)
+    w.remote = {"save_time": 1000, "uploaded_at": 2000}
+    remote = {"save_time": 1700000000000, "uploaded_at": 1700000060000}
+    w.background_mode = background
+    w.synced({"message": "同步成功", "remote": remote, "uid": "uid", "account": 123, "game_id": 42})
+    assert w.remote == remote
+    w.background_mode = False
+    w.render_game()
+    # A refresh/reselection of the same game must not clear this result.
+    w.filter_games()
+    assert f"云端存档时间：{date(remote['save_time'])}" in w.times.text()
+    assert f"云端上传时间：{date(remote['uploaded_at'])}" in w.times.text()
+    assert "暂无" not in "\n".join(w.times.text().splitlines()[1:])
+
+
+@pytest.mark.parametrize("field,value", [("game_id", 43), ("account", 456), ("uid", "another-user")])
+def test_sync_result_for_another_game_or_account_does_not_replace_display(tmp_path, monkeypatch, field, value):
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.game = {"game_id": 42, "game_name": "测试"}
+    w.cloud.uid = "uid"
+    w.remote = {"save_time": 1234, "uploaded_at": 2345}
+    result = {"message": "同步成功", "remote": {"save_time": 9999, "uploaded_at": 9999},
+              "uid": "uid", "account": 123, "game_id": 42, field: value}
+    w.synced(result)
+    assert w.remote == {"save_time": 1234, "uploaded_at": 2345}
+
+
 def finish_update_jobs(window):
     for _ in range(4):
         assert window.update_pool.waitForDone(5000)

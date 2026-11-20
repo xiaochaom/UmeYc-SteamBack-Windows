@@ -96,8 +96,11 @@ class WindowsCloud(CloudService):
         return self._prepare_launch(account, game["game_id"])
 
     def upload(self, account, game, expected_revision=None, expected_uid=None, base_hash=CURRENT_BASELINE, confirmed_source=None):
-        self.isolated_engine(account).guard(game)
-        return super().upload(account, game, expected_revision, expected_uid, base_hash=base_hash, confirmed_source=confirmed_source)
+        with self.lock:
+            self.isolated_engine(account).guard(game)
+            result = super().upload(account, game, expected_revision, expected_uid,
+                                    base_hash=base_hash, confirmed_source=confirmed_source)
+            return {**result, "uid": self.uid, "account": account, "game_id": int(game["game_id"])}
 
     def inspect(self, account, game, expected_revision=None):
         with self.lock:
@@ -176,4 +179,5 @@ class WindowsCloud(CloudService):
                 engine.align_cloud_paths(game, manifest)
                 engine.apply(game, manifest, staging, "cloud_sync")
                 self.remember(account, game, manifest["content_hash"])
-            return {"message": "云端存档已覆盖到游戏存档路径；下载记录及覆盖前备份已保留"}
+            return {"message": "云端存档已覆盖到游戏存档路径；下载记录及覆盖前备份已保留",
+                    "remote": remote, "uid": self.uid, "account": account, "game_id": int(game["game_id"])}
