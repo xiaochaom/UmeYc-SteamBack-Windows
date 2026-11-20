@@ -1,9 +1,27 @@
 """同用户单实例通信；仅接收显示窗口、同步请求，不接收执行命令。"""
 import hashlib
 import json
+import math
+import re
 
 from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+
+def valid_launch_command(value):
+    if not isinstance(value, dict) or value.get("action") not in {"prepare", "finished"}:
+        return False
+    base = {"action", "account", "game_id"}
+    owner = {"session", "pid", "started"}
+    if set(value) not in (base, base | owner):
+        return False
+    if not all(type(value[k]) is int and 0 < value[k] < 2**32 for k in ("account", "game_id")):
+        return False
+    if "session" not in value:
+        return True  # Existing launchers can finish across an app upgrade.
+    return (isinstance(value["session"], str) and re.fullmatch(r"[a-f0-9]{32}", value["session"]) is not None
+            and type(value["pid"]) is int and 0 < value["pid"] < 2**32
+            and type(value["started"]) in (float, int) and math.isfinite(value["started"]) and value["started"] > 0)
 
 
 def server_name(data):
@@ -69,9 +87,7 @@ class CommandServer(QObject):
             value = json.loads(bytes(socket.readLine()))
             if value == {"action": "show"}:
                 pass
-            elif (isinstance(value, dict) and value.get("action") in {"prepare", "finished"}
-                  and set(value) == {"action", "account", "game_id"}
-                  and all(type(value[k]) is int and 0 < value[k] < 2**32 for k in ("account", "game_id"))):
+            elif valid_launch_command(value):
                 pass
             else:
                 raise ValueError("无效启动命令")

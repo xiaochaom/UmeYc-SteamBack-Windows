@@ -4,7 +4,30 @@ import os
 import subprocess
 import sys
 import time
+import json
+import uuid
+
+import psutil
 from .storage import data_directory
+
+WRAPPER_CONTEXT = "UMEYC_STEAMBACK_LAUNCH_SESSION"
+
+
+def inherited_wrapper(account, game_id):
+    """Only a live ancestor for this game can own a nested launch entry."""
+    try:
+        owner = json.loads(os.environ.get(WRAPPER_CONTEXT, "null"))
+        if not isinstance(owner, dict) or owner.get("account") != account or owner.get("game_id") != game_id:
+            return None
+        from .ipc import valid_launch_command
+        if not valid_launch_command(owner) or "session" not in owner:
+            return None
+        if any(p.pid == owner["pid"] and abs(p.create_time() - owner["started"]) < .01
+               for p in psutil.Process().parents()):
+            return owner
+    except (ValueError, TypeError, psutil.Error):
+        pass
+    return None
 
 
 def parse_args(argv):
@@ -32,11 +55,18 @@ def run_steam_wrapper(args, data, connect=None, start_host=None, run_game=None, 
     from .ipc import request, server_name
     connect = connect or request
     wait = wait or time.sleep
-    run_game = run_game or (lambda command: subprocess.Popen(command, shell=False))
+    inherited = inherited_wrapper(args.account, args.game_id)
+    command = inherited or {"action": "prepare", "account": args.account, "game_id": args.game_id,
+                            "session": uuid.uuid4().hex, "pid": os.getpid(), "started": psutil.Process().create_time()}
+    run_game = run_game or (lambda argv: subprocess.Popen(argv, shell=False,
+                            env={**os.environ, WRAPPER_CONTEXT: json.dumps(command)}))
     start_host = start_host or (lambda: subprocess.Popen(app_command("--background", "--session-host"), close_fds=True))
     check_steam_account(args.account)
+    if inherited:
+        # A duplicated Steam prefix or a loader may invoke the entry again.
+        # The outer wrapper already synchronized and owns the final upload.
+        return run_game(args.command).wait()
     name = server_name(data)
-    command = {"action": "prepare", "account": args.account, "game_id": args.game_id}
     result = connect(name, command, 30 * 60 * 1000)
     if result is None:
         start_host()

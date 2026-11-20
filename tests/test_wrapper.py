@@ -1,4 +1,10 @@
 from types import SimpleNamespace
+import json
+import os
+import subprocess
+import sys
+
+import psutil
 
 import pytest
 
@@ -12,8 +18,10 @@ def args():
 
 def test_wrapper_waits_for_sync_then_executes_original_command_and_reports_exit(tmp_path):
     events = []
+    requests = []
     def connect(name, command, timeout):
         events.append(command["action"])
+        requests.append(command)
         return {"ok": True}
     def run(command):
         events.append(list(command))
@@ -21,6 +29,39 @@ def test_wrapper_waits_for_sync_then_executes_original_command_and_reports_exit(
     result = run_steam_wrapper(args(), tmp_path, connect=connect, run_game=run)
     assert events == ["prepare", args().command, "finished"]
     assert result == 7
+    assert requests[0]["session"] == requests[1]["session"]
+    assert requests[0]["pid"] == os.getpid()
+    assert requests[0]["started"] == psutil.Process().create_time()
+
+
+def test_nested_entry_from_live_parent_runs_game_without_a_second_sync(tmp_path):
+    from umeyc_steamback.cli import WRAPPER_CONTEXT
+    owner = {"action": "prepare", "account": 123, "game_id": 42, "session": "a" * 32,
+             "pid": os.getpid(), "started": psutil.Process().create_time()}
+    code = """
+from types import SimpleNamespace
+from umeyc_steamback.cli import parse_args, run_steam_wrapper
+import sys
+args = parse_args(['--steam-launch', '--account', '123', '--game-id', '42', '--', 'game.exe'])
+def forbidden(*args):
+    raise AssertionError('Nested entry must not create a second session')
+result = run_steam_wrapper(args, sys.argv[1], connect=forbidden, start_host=forbidden,
+                          run_game=lambda command: SimpleNamespace(wait=lambda: 7))
+assert result == 7
+"""
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True,
+                            env={**os.environ, WRAPPER_CONTEXT: json.dumps(owner)})
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("change", ["account", "game_id", "started", "pid"])
+def test_stale_or_unrelated_inherited_context_cannot_skip_sync(monkeypatch, change):
+    from umeyc_steamback.cli import inherited_wrapper, WRAPPER_CONTEXT
+    owner = {"action": "prepare", "account": 123, "game_id": 42, "session": "a" * 32,
+             "pid": os.getppid(), "started": psutil.Process(os.getppid()).create_time()}
+    owner[change] += 100
+    monkeypatch.setenv(WRAPPER_CONTEXT, json.dumps(owner))
+    assert inherited_wrapper(123, 42) is None
 
 
 def test_failed_preflight_never_starts_game(tmp_path):
@@ -62,3 +103,15 @@ def test_original_game_arguments_cannot_be_parsed_as_tool_flags():
     value = parse_args(["--steam-launch", "--account", "123", "--game-id", "42", "--", "game.exe", "--account", "999"])
     assert value.account == 123
     assert value.command == ["game.exe", "--account", "999"]
+
+
+@pytest.mark.parametrize("change", [
+    {"session": "invalid"}, {"pid": True}, {"pid": -1}, {"started": float("nan")},
+    {"started": "1"}, {"account": False}, {"unexpected": 1},
+])
+def test_ipc_rejects_invalid_launch_ownership(change):
+    from umeyc_steamback.ipc import valid_launch_command
+    command = {"action": "prepare", "account": 123, "game_id": 42,
+               "session": "a" * 32, "pid": os.getpid(), "started": psutil.Process().create_time()}
+    assert valid_launch_command(command)
+    assert not valid_launch_command({**command, **change})

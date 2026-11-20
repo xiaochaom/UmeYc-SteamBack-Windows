@@ -4,6 +4,21 @@ from pathlib import Path
 import subprocess
 import sys
 
+import psutil
+
+
+def launch_owner_alive(owner):
+    if not owner:
+        return False
+    try:
+        process = psutil.Process(owner["pid"])
+        return abs(process.create_time() - owner["started"]) < .01 and process.is_running()
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
+        # An unreadable live owner must not authorize concurrent save writes.
+        return True
+
 
 def app_directory():
     """Portable data belongs beside the EXE, never in PyInstaller's temp tree."""

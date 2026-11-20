@@ -289,6 +289,59 @@ def test_ipc_sync_is_acknowledged_only_after_background_result(tmp_path):
     server.server.close()
 
 
+@pytest.mark.parametrize("previous", ["timestamp_only", "dead_owner", "reused_pid"])
+def test_stale_launch_session_does_not_block_fresh_start(tmp_path, monkeypatch, previous):
+    import os
+    import psutil
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    game = {"game_id": 42, "game_name": "测试"}
+    w.items = [game]
+    w.sessions[(123, 42)] = time.monotonic()
+    if previous != "timestamp_only":
+        w.session_owners[(123, 42)] = {"session": "a" * 32, "pid": os.getpid(),
+                                      "started": psutil.Process().create_time() - 100}
+        if previous == "dead_owner":
+            monkeypatch.setattr("umeyc_steamback.app.desktop.launch_owner_alive", lambda _: False)
+    calls, replies = [], []
+    monkeypatch.setattr(w.cloud, "prepare_steam_launch", lambda account, g: calls.append(g) or {"message": "同步完成"})
+    monkeypatch.setattr(w, "task", lambda message, work, done, failed, **kwargs: done(work()))
+    command = {"action": "prepare", "account": 123, "game_id": 42,
+               "session": "b" * 32, "pid": os.getpid(), "started": psutil.Process().create_time()}
+    w.handle_command(command, replies.append)
+    assert replies == [{"ok": True}] and calls == [game]
+    assert w.session_owners[(123, 42)]["session"] == "b" * 32
+
+
+def test_launch_retry_reuses_result_and_late_exit_cannot_clear_new_session(tmp_path, monkeypatch):
+    import os
+    import psutil
+    monkeypatch.setattr(Window, "refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.app.desktop.check_steam_account", lambda _: None)
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    w.engine.account_ids = {123}
+    w.items = [{"game_id": 42, "game_name": "测试"}]
+    monkeypatch.setattr(w, "task", lambda message, work, done, failed, **kwargs: done(work()))
+    calls, replies = [], []
+    monkeypatch.setattr(w.cloud, "prepare_steam_launch", lambda *args: calls.append(True) or {"message": "同步完成"})
+    command = {"action": "prepare", "account": 123, "game_id": 42,
+               "session": "a" * 32, "pid": os.getpid(), "started": psutil.Process().create_time()}
+    w.handle_command(command, replies.append)
+    w.handle_command(command, replies.append)
+    assert replies == [{"ok": True}, {"ok": True}] and calls == [True]
+    w.handle_command({**command, "session": "b" * 32}, replies.append)
+    assert replies[-1]["ok"] is False
+    assert calls == [True]
+    w.handle_command({**command, "session": "b" * 32, "action": "finished"}, replies.append)
+    assert (123, 42) in w.sessions
+    w.handle_command({**command, "action": "finished"}, replies.append)
+    assert (123, 42) not in w.sessions and not w.session_owners
+
+
 def test_game_page_has_additive_launch_configuration_without_restore_action(tmp_path, monkeypatch):
     monkeypatch.setattr("umeyc_steamback.app.Window.refresh", lambda _: None)
     w = Window(tmp_path / "data")

@@ -143,6 +143,7 @@ class Window(QMainWindow):
         self.close_retry.timeout.connect(self.close)
         self.session_host = False
         self.sessions = {}
+        self.session_owners = {}
         self.last_session_work = time.monotonic()
         self.local_times = {}
         self.update_busy = False
@@ -389,6 +390,7 @@ class Window(QMainWindow):
             return
         self.update_retry.stop()
         self.sessions.clear()
+        self.session_owners.clear()
         self.cloud.running.clear()
         self.installing_update = True
         self.monitor.stop()
@@ -473,7 +475,12 @@ class Window(QMainWindow):
                 raise ValueError("请先在工具里配置此游戏的存档路径")
             game = games[aid]
             if command["action"] == "finished":
+                owner = self.session_owners.get((account, aid))
+                if owner and owner.get("session") != command.get("session"):
+                    reply({"ok": True})  # A late exit from an older session.
+                    return
                 self.sessions.pop((account, aid), None)
+                self.session_owners.pop((account, aid), None)
                 # Registry can remain running until the wrapper exits. Let
                 # observe() wait for it to clear before scheduling the upload.
                 if self.cloud.uid and self.cloud.read_state().get(self.cloud.key(account, game), {}).get("auto_upload"):
@@ -484,10 +491,21 @@ class Window(QMainWindow):
             reply({"ok": False, "error": str(error)})
             return
         if (account, aid) in self.sessions:
-            reply({"ok": False, "error": "此游戏已存在运行中的同步会话，请退出后再启动"})
-            return
+            owner = self.session_owners.get((account, aid))
+            if owner and desktop.launch_owner_alive(owner):
+                if all(owner.get(k) == command.get(k) for k in ("session", "pid", "started")):
+                    reply({"ok": True})  # Lost acknowledgements can be retried.
+                else:
+                    reply({"ok": False, "error": "此游戏的另一个启动入口仍在运行，请勿重复启动"})
+                return
+            # A timestamp or cached Steam flag is not evidence of a live
+            # wrapper. The prelaunch save guard still checks actual game files.
+            self.sessions.pop((account, aid), None)
+            self.session_owners.pop((account, aid), None)
         def done(result):
             self.sessions[(account, aid)] = time.monotonic()
+            if "session" in command:
+                self.session_owners[(account, aid)] = {k: command[k] for k in ("session", "pid", "started")}
             self.page_dirty = True
             self.status.setText(result["message"])
             reply({"ok": True})
@@ -1090,10 +1108,13 @@ class Window(QMainWindow):
             self.cloud.running = {(account, aid) for aid in running}
             now = time.monotonic()
             for key, started in list(self.sessions.items()):
-                if key[0] == account and key[1] not in running and now - started > 90:
+                owner = self.session_owners.get(key)
+                if (key[0] == account and key[1] not in running
+                        and ((owner and not desktop.launch_owner_alive(owner)) or (not owner and now - started > 90))):
                     # Recover if the Steam wrapper was killed before reporting
                     # its exit. Upload intents are already persisted by observe.
                     self.sessions.pop(key, None)
+                    self.session_owners.pop(key, None)
             if pending:
                 def upload():
                     try:
