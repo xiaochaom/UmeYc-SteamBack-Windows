@@ -20,10 +20,10 @@ from .engine import Config, Engine, WindowsSniffer, read_json
 from .protocol.cloud import CloudConflict, pack_current
 from .protocol.custom import write_json
 from .sync import WindowsCloud
-from .appinfo import cloud_support
 from . import desktop
 from .launch_options import LaunchOptions
 from .ipc import CommandServer, request, server_name
+from .updates import check_updates
 
 
 def date(value):
@@ -175,6 +175,12 @@ class Window(QMainWindow):
         self.sessions = {}
         self.last_session_work = time.monotonic()
         self.local_times = {}
+        self.update_busy = False
+        self.update_url = None
+        self.update_action = None
+        self.update_job = None
+        self.update_pool = QThreadPool(self)
+        self.update_pool.setMaxThreadCount(1)
         self.setWindowTitle(f"UmeYc-SteamBack-Windows  {__version__}")
         self.resize(1120, 810)
         icon = Path(__file__).parent / "assets/cloud-save.svg"
@@ -199,6 +205,13 @@ class Window(QMainWindow):
         settings_row.addWidget(label("Steam 启动时按需唤起；上传完成后自动退出，无需开机自启。"))
         button("后台记录", self.show_activity, settings_row)
         layout.addLayout(settings_row)
+        update_row = QHBoxLayout()
+        self.update_status = label(f"当前版本：{__version__}")
+        update_row.addWidget(self.update_status, 1)
+        self.check_update_button = button("检查更新", self.check_for_updates, update_row)
+        self.download_update_button = button("下载新版", self.open_update, update_row)
+        self.download_update_button.hide()
+        layout.addLayout(update_row)
         self.splitter = QSplitter()
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -307,12 +320,48 @@ class Window(QMainWindow):
             show.triggered.connect(self.show_window)
             activity = menu.addAction("查看后台同步记录")
             activity.triggered.connect(lambda: (self.show_window(), self.show_activity()))
+            self.update_action = menu.addAction("检查更新")
+            self.update_action.triggered.connect(lambda: (self.show_window(), self.check_for_updates()))
             menu.addSeparator()
             quit_action = menu.addAction("退出程序（停止监听）")
             quit_action.triggered.connect(self.quit_app)
             self.tray.setContextMenu(menu)
             self.tray.activated.connect(lambda reason: self.show_window() if reason == QSystemTrayIcon.DoubleClick else None)
             self.tray.show()
+
+    def check_for_updates(self):
+        # Separate worker pool and state: an unavailable GitHub connection must
+        # never occupy the serialized game-save/sync task or block launch IPC.
+        if self.update_busy or self.quitting:
+            return
+        self.update_busy = True
+        self.check_update_button.setEnabled(False)
+        self.update_status.setText(f"当前版本：{__version__} · 正在检查更新…")
+        job = Job(check_updates)
+        self.update_job = job
+        def complete(result, error):
+            self.update_busy = False
+            self.check_update_button.setEnabled(True)
+            if error:
+                message = str(error) if isinstance(error, ValueError) else "检查更新失败，请稍后重试"
+                self.update_status.setText(f"当前版本：{__version__} · {message}")
+                return  # Keep any previously discovered download available.
+            self.update_url = result.url if result.available else None
+            self.download_update_button.setVisible(result.available)
+            self.update_status.setText(f"当前版本：{__version__} · 发现新版 {result.version}" if result.available
+                                       else f"当前版本：{__version__} · 已是最新版本")
+            if self.update_action:
+                self.update_action.setText(f"下载新版 {result.version}" if result.available else "检查更新")
+                self.update_action.triggered.disconnect()
+                self.update_action.triggered.connect(self.open_update if result.available else
+                    lambda: (self.show_window(), self.check_for_updates()))
+        job.signals.done.connect(complete)
+        self.update_pool.start(job)
+
+    def open_update(self):
+        if self.update_url:
+            if not QDesktopServices.openUrl(QUrl(self.update_url)):
+                self.update_status.setText("无法打开发布页，请稍后重试")
 
     def show_window(self):
         self.session_host = False  # Explicitly opened management stays available.
@@ -353,6 +402,7 @@ class Window(QMainWindow):
     def handle_command(self, command, reply):
         if command["action"] == "show":
             self.show_window()
+            self.check_for_updates()
             reply({"ok": True})
             return
         if len(self.launch_requests) >= 10:
@@ -509,9 +559,6 @@ class Window(QMainWindow):
             if self.engine.account_ids:
                 for g in self.engine.configured_games():
                     games.setdefault(g["game_id"], g)
-            support = cloud_support(self.engine.get_steam_root(), games)
-            for game in games.values():
-                game["steam_cloud"] = support.get(str(game["game_id"]))
             return list(games.values()), self.cloud.account_status()
         def show(result):
             self.items, self.auth = result
@@ -530,24 +577,14 @@ class Window(QMainWindow):
         text = self.search.text().casefold()
         self.games_list.blockSignals(True)
         self.games_list.clear()
-        groups = [(False, "不支持 Steam 云存档"), (True, "支持 Steam 云存档"), (None, "Steam 云支持待确认")]
-        for support, title in groups:
-            entries = [g for g in self.items if g.get("steam_cloud") is support
-                       and text in f"{g['game_name']} {g['game_id']}".casefold()]
-            if not entries:
-                continue
-            header = QListWidgetItem(f"{title}（{len(entries)}）")
-            header.setFlags(Qt.NoItemFlags)
-            font = header.font()
-            font.setBold(True)
-            header.setFont(font)
-            self.games_list.addItem(header)
-            for game in sorted(entries, key=lambda g: g["game_name"].casefold()):
-                item = QListWidgetItem(f"{game['game_name']}\nApp ID {game['game_id']}")
-                item.setData(Qt.UserRole, game)
-                self.games_list.addItem(item)
-                if game["game_id"] == selected:
-                    self.games_list.setCurrentItem(item)
+        entries = [g for g in self.items if not steam.is_compatibility_tool(g["game_name"])
+                   and text in f"{g['game_name']} {g['game_id']}".casefold()]
+        for game in sorted(entries, key=lambda g: g["game_name"].casefold()):
+            item = QListWidgetItem(f"{game['game_name']}\nApp ID {game['game_id']}")
+            item.setData(Qt.UserRole, game)
+            self.games_list.addItem(item)
+            if game["game_id"] == selected:
+                self.games_list.setCurrentItem(item)
         if not self.games_list.currentItem():
             first = next((i for i in range(self.games_list.count()) if self.games_list.item(i).data(Qt.UserRole)), None)
             if first is not None:
@@ -1040,6 +1077,7 @@ def main():
     window = Window(data)
     window.session_host = "--session-host" in sys.argv
     if not smoke_temp:
+        QTimer.singleShot(0, window.check_for_updates)
         try:
             window.launch_options.recover()
             window.setup_background()

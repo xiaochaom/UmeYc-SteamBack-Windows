@@ -7,7 +7,8 @@ Windows 游戏存档管理工具，通过夸克网盘与 [UmeYc-SteamBack Steam 
 ## 功能
 
 - 中文界面，识别 Steam 多个游戏库与账号；可以手动填写 Steam App ID。
-- 隐藏 Proton、GE-Proton、Steam Linux Runtime 兼容层；不支持 Steam 云的游戏置于上方，支持的置于下方。元数据缺失时另列“待确认”。两组都支持夸克云同步。
+- 隐藏 Proton、GE-Proton、Steam Linux Runtime 兼容层，其余游戏统一按名称排列，不区分 Steam 云支持情况。
+- 每次程序启动时在独立后台任务中检查 GitHub 正式版本；发现新版显示下载入口，也可手动检查。更新失败不影响存档同步或游戏启动，后台不弹窗。
 - 夸克 App 扫码登录，显示昵称及用户 ID。Windows 会话使用当前用户 DPAPI 加密。
 - 候选路径识别、手动选择存档文件/目录、游戏保存前后的文件变化嗅探；无需游戏支持 Steam 云。
 - 手动备份到本地，可重命名、恢复、删除。备份持续保留，没有固定或滚动删除机制。
@@ -24,7 +25,7 @@ Windows 游戏存档管理工具，通过夸克网盘与 [UmeYc-SteamBack Steam 
 打开仓库 [Releases](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/releases/latest)，
 下载 `UmeYc-SteamBack-Windows.zip`，解压并保持完整目录结构，运行
 `UmeYc-SteamBack-Windows.exe`。不需要安装 Python；`SHA256.txt` 可用于校验下载文件。
-程序未签名。主分支及功能分支构建同时在 [Actions](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/actions)
+程序未签名。发现新版后点击“下载新版”打开正式发布页，完整解压新版本；替换程序前请等待同步完成并退出工具。应用数据和本地备份独立保存，保留原程序目录可继续使用已配置的 Steam 启动项。主分支及功能分支构建同时在 [Actions](https://github.com/xiaochaom/UmeYc-SteamBack-Windows/actions)
 提供 30 天有效的调试制品。只有推送版本标签才会在所有 Windows 检查通过后发布 Release。
 
 源码运行（Python 3.11/3.12）：
@@ -75,7 +76,7 @@ py -3.12 -m venv .venv
 
 Windows 的真实 Steam 启动项、反作弊及启动后脱离父进程的第三方启动器仍需设备验证。工具按 Steam 运行标记和游戏目录进程辅助判断退出；不要在上传完成前强制关机。Deck 插件使用 Steam 游戏模式的启动请求，不需要配置 Windows 启动项。
 
-列表分组只读本地 Steam `appcache/appinfo.vdf`（v27/v28/v29）的云能力标记，不以有无存档文件、是否开启 Steam 云同步判断。未知格式或元数据未缓存时归为待确认。
+游戏列表不再读取 Steam 云支持元数据或显示支持情况分组。手动添加的游戏与已安装 Steam 游戏统一排列，选择存档路径后可使用夸克同步。
 
 ## 备份、恢复与时间
 
@@ -99,5 +100,3 @@ Windows 的真实 Steam 启动项、反作弊及启动后脱离父进程的第�
 测试使用隔离目录和模拟网盘，不修改真实游戏存档。含 Deck v1.4.5 原始代码生成的格式兼容 fixture、同步冲突、失败保留旧版、恢复回滚、Windows 路径防护、界面重命名弹窗回归。Windows CI 额外验证 DPAPI、目录联接防护及打包 EXE 启动。扫码登录、真实夸克传输和实际游戏互通需要设备联调确认。
 
 GPL-3.0-or-later，来源及依赖许可见 [NOTICE](NOTICE) 与 [LICENSE](LICENSE)。提交身份为 xiaochaom。
-
-游戏列表按 Steam 元数据 `common/category/category_23`（Steam 云功能标记）分组。内部 UFS 配额、存档路径和隐藏云配置不代表游戏已支持 Steam 云，因此不用于分组；这不影响插件查找存档或夸克同步。

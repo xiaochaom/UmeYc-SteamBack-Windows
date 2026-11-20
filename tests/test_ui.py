@@ -85,7 +85,7 @@ def test_path_and_mapping_dialog_preserves_order(tmp_path):
     assert mapping.paths() == dialog.paths()
 
 
-def test_game_groups_and_launch_uses_normal_steam_entry(tmp_path, monkeypatch):
+def test_unified_game_list_filters_compatibility_tools_and_launch_uses_normal_steam_entry(tmp_path, monkeypatch):
     from PySide6.QtGui import QDesktopServices
     app = QApplication.instance() or QApplication([])
     write_json(tmp_path / "data/ui.json", {"steam": str(tmp_path / "Steam"), "account": 123})
@@ -93,12 +93,18 @@ def test_game_groups_and_launch_uses_normal_steam_entry(tmp_path, monkeypatch):
     monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda _: set())
     w = Window(tmp_path / "data")
     w.monitor.stop()
-    g = {"game_id": 42, "game_name": "有云游戏", "install_root": str(tmp_path / "Steam"), "steam_cloud": True}
-    w.items = [g, {**g, "game_id": 43, "game_name": "无云游戏", "steam_cloud": False}]
+    g = {"game_id": 42, "game_name": "DARK SOULS III", "install_root": str(tmp_path / "Steam"), "steam_cloud": True}
+    w.items = [g, {**g, "game_id": 43, "game_name": "Shadows", "steam_cloud": False},
+               {**g, "game_id": 44, "game_name": "Proton - Experimental"},
+               {**g, "game_id": 45, "game_name": "Portal 2", "steam_cloud": None}]
     w.filter_games()
-    assert w.games_list.item(0).text().startswith("不支持 Steam 云存档")
-    assert w.games_list.item(1).data(256)["game_id"] == 43
-    assert w.games_list.item(2).text().startswith("支持 Steam 云存档")
+    assert [w.games_list.item(i).data(256)["game_name"] for i in range(w.games_list.count())] == [
+        "DARK SOULS III", "Portal 2", "Shadows"]
+    w.games_list.setCurrentRow(2)
+    w.search.setText("43")
+    assert w.games_list.count() == 1 and w.game["game_id"] == 43
+    w.search.clear()
+    assert w.games_list.count() == 3 and w.game["game_id"] == 43
     drain(app, w)
     opened = []
     monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
@@ -203,4 +209,79 @@ def test_manual_sync_requires_explicit_direction_and_close_never_writes(tmp_path
     QTimer.singleShot(0, select)
     w.manual_sync_dialog({'game_id': 42}, 123, {'save_time': 1770000000000})
     assert events == expected
+    w.close()
+
+
+def test_update_check_does_not_occupy_sync_worker_or_popup_when_hidden(tmp_path, monkeypatch):
+    import threading
+    from PySide6.QtGui import QDesktopServices
+    from umeyc_steamback.updates import UpdateResult
+    monkeypatch.setattr('umeyc_steamback.app.Window.refresh', lambda _: None)
+    entered, finish = threading.Event(), threading.Event()
+    calls = []
+    def check():
+        calls.append(1)
+        entered.set()
+        assert finish.wait(4)
+        return UpdateResult('0.2.0', True, 'https://github.com/xiaochaom/UmeYc-SteamBack-Windows/releases/tag/v0.2.0')
+    monkeypatch.setattr('umeyc_steamback.app.check_updates', check)
+    w = Window(tmp_path / 'data')
+    w.monitor.stop()
+    w.hide_window()
+    try:
+        w.check_for_updates()
+        assert entered.wait(1)
+        assert w.update_busy and not w.busy
+        w.check_for_updates()  # A second click must not start a duplicate request.
+        synced = []
+        w.task('', lambda: 'synced', synced.append, quiet=True)
+        drain(_APPLICATION, w)
+        assert synced == ['synced'] and calls == [1]
+    finally:
+        finish.set()
+        assert w.update_pool.waitForDone(2000)
+        _APPLICATION.processEvents()
+    assert not w.update_busy and not w.isVisible()
+    assert _APPLICATION.activeModalWidget() is None
+    assert '0.2.0' in w.update_status.text()
+    opened = []
+    monkeypatch.setattr(QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()) or True)
+    w.open_update()
+    assert opened == [w.update_url]
+    w.close()
+
+
+def test_update_failure_preserves_sync_status_and_previous_download(tmp_path, monkeypatch):
+    from umeyc_steamback.updates import UpdateResult
+    monkeypatch.setattr('umeyc_steamback.app.Window.refresh', lambda _: None)
+    monkeypatch.setattr('umeyc_steamback.app.check_updates', lambda: UpdateResult('0.2.0', True, 'https://github.com/xiaochaom/UmeYc-SteamBack-Windows/releases/tag/v0.2.0'))
+    w = Window(tmp_path / 'data')
+    w.monitor.stop()
+    w.check_for_updates()
+    assert w.update_pool.waitForDone(2000)
+    _APPLICATION.processEvents()
+    w.status.setText('存档同步中')
+    def offline():
+        raise ValueError('无法检查更新，请检查网络后重试')
+    monkeypatch.setattr('umeyc_steamback.app.check_updates', offline)
+    w.check_for_updates()
+    assert w.update_pool.waitForDone(2000)
+    _APPLICATION.processEvents()
+    assert '检查网络' in w.update_status.text()
+    assert w.status.text() == '存档同步中'
+    assert w.update_url and not w.download_update_button.isHidden()
+    assert w.check_update_button.isEnabled()
+    assert _APPLICATION.activeModalWidget() is None
+    w.close()
+
+
+def test_reopening_existing_background_host_checks_updates_again(tmp_path, monkeypatch):
+    monkeypatch.setattr('umeyc_steamback.app.Window.refresh', lambda _: None)
+    w = Window(tmp_path / 'data')
+    w.monitor.stop()
+    events = []
+    monkeypatch.setattr(w, 'show_window', lambda: events.append('show'))
+    monkeypatch.setattr(w, 'check_for_updates', lambda: events.append('check'))
+    w.handle_command({'action': 'show'}, lambda reply: events.append(reply))
+    assert events == ['show', 'check', {'ok': True}]
     w.close()
