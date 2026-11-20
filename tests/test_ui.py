@@ -6,6 +6,10 @@ from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 from umeyc_steamback.app import Window, PathsDialog, MappingDialog
 from umeyc_steamback.protocol.custom import write_json
 
+# Qt requires one QApplication for the entire process. Retain a strong
+# reference so individual test scopes cannot destroy it between windows.
+_APPLICATION = QApplication.instance() or QApplication([])
+
 
 def drain(app, window, timeout=5):
     deadline = time.monotonic() + timeout
@@ -59,3 +63,34 @@ def test_path_and_mapping_dialog_preserves_order(tmp_path):
     assert dialog.paths() == ["C:/Saves/B", "C:/Saves/A"]
     mapping = MappingDialog(["custom-0", "custom-1"], dialog.paths(), None)
     assert mapping.paths() == dialog.paths()
+
+
+def test_game_groups_and_launch_waits_for_cloud_sync(tmp_path, monkeypatch):
+    import threading
+    from PySide6.QtGui import QDesktopServices
+    app = QApplication.instance() or QApplication([])
+    write_json(tmp_path / "data/ui.json", {"steam": str(tmp_path / "Steam"), "account": 123})
+    monkeypatch.setattr("umeyc_steamback.app.Window.refresh", lambda _: None)
+    monkeypatch.setattr("umeyc_steamback.steam.running_games", lambda _: set())
+    w = Window(tmp_path / "data")
+    w.monitor.stop()
+    g = {"game_id": 42, "game_name": "有云游戏", "install_root": str(tmp_path / "Steam"), "steam_cloud": True}
+    w.items = [g, {**g, "game_id": 43, "game_name": "无云游戏", "steam_cloud": False}]
+    w.filter_games()
+    assert w.games_list.item(0).text().startswith("不支持 Steam 云存档")
+    assert w.games_list.item(1).data(256)["game_id"] == 43
+    assert w.games_list.item(2).text().startswith("支持 Steam 云存档")
+    drain(app, w)
+    opened, event = [], threading.Event()
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
+    def prepare(account, game):
+        assert event.wait(3)
+        return {"message": "已同步", "synced": True}
+    monkeypatch.setattr(w.cloud, "prepare_game_launch", prepare)
+    w.launch_game()
+    app.processEvents()
+    assert not opened
+    event.set()
+    drain(app, w)
+    assert opened == ["steam://rungameid/43"]
+    w.close()

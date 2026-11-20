@@ -9,6 +9,14 @@ import vdf
 STEAM_ID_BASE = 76561197960265728
 
 
+def is_compatibility_tool(name):
+    return bool(re.fullmatch(
+        r"(?:proton(?:\s*[-_]\s*|\s+)?(?:\d[\w.\s-]*|experimental|hotfix|next|bleeding[ -]edge)"
+        r"|(?:ge[-_ ]?proton|proton[-_ ]?ge)(?:[-_ ]?\d[\w.\s-]*)?"
+        r"|steam linux runtime(?:\s*[-_]\s*|\s+)?(?:\d[\w.\s-]*(?:\([a-z]+\))?|soldier|sniper|scout)?|proton)",
+        name.strip(), re.I))
+
+
 def read_vdf(path):
     try:
         with Path(path).open(encoding="utf-8-sig", errors="replace") as stream:
@@ -54,6 +62,8 @@ def games(root):
             if not str(app.get("appid", "")).isdigit():
                 continue
             aid = int(app["appid"])
+            if is_compatibility_tool(app.get("name", "")):
+                continue
             result[aid] = {"game_id": aid, "game_name": app.get("name", str(aid)),
                            "install_root": str(library), "install_dir": app.get("installdir", "")}
     return sorted(result.values(), key=lambda g: g["game_name"].casefold())

@@ -20,6 +20,7 @@ from .engine import Config, Engine, WindowsSniffer, read_json
 from .protocol.cloud import CloudConflict, pack_current
 from .protocol.custom import write_json
 from .sync import WindowsCloud
+from .appinfo import cloud_support
 
 
 def date(value):
@@ -209,12 +210,19 @@ class Window(QMainWindow):
         button("开始嗅探存档位置", self.begin_sniff, sniff_actions)
         button("游戏保存并退出后，完成嗅探", self.finish_sniff, sniff_actions)
         page.addLayout(sniff_actions)
+        self.launch_button = QPushButton("开始游戏")
+        self.launch_button.clicked.connect(self.launch_game)
+        page.addWidget(self.launch_button)
         page.addWidget(line())
         heading = label("云存档 · 夸克")
         heading.setStyleSheet("font-size: 17px; font-weight: 600;")
         page.addWidget(heading)
         self.times = label("本地存档时间：暂无\n云端存档时间：请刷新云端状态")
         page.addWidget(self.times)
+        self.auto_download = QCheckBox("开始游戏前自动云同步（默认关闭）")
+        self.auto_download.clicked.connect(self.toggle_auto_download)
+        page.addWidget(self.auto_download)
+        page.addWidget(label("通过本工具的“开始游戏”生效；直接从 Steam 开始无法拦截。本地有未上传进度时会暂停启动并提示。"))
         self.auto = QCheckBox("游戏关闭后自动上传云存档（默认关闭，需保持本程序运行）")
         self.auto.clicked.connect(self.toggle_auto)
         page.addWidget(self.auto)
@@ -368,6 +376,9 @@ class Window(QMainWindow):
             if self.engine.account_ids:
                 for g in self.engine.configured_games():
                     games.setdefault(g["game_id"], g)
+            support = cloud_support(self.engine.get_steam_root(), games)
+            for game in games.values():
+                game["steam_cloud"] = support.get(str(game["game_id"]))
             return list(games.values()), self.cloud.account_status()
         def show(result):
             self.items, self.auth = result
@@ -384,17 +395,32 @@ class Window(QMainWindow):
     def filter_games(self):
         selected = self.game["game_id"] if self.game else None
         text = self.search.text().casefold()
+        self.games_list.blockSignals(True)
         self.games_list.clear()
-        for game in sorted(self.items, key=lambda g: g["game_name"].casefold()):
-            if text not in f"{game['game_name']} {game['game_id']}".casefold():
+        groups = [(False, "不支持 Steam 云存档"), (True, "支持 Steam 云存档"), (None, "Steam 云支持待确认")]
+        for support, title in groups:
+            entries = [g for g in self.items if g.get("steam_cloud") is support
+                       and text in f"{g['game_name']} {g['game_id']}".casefold()]
+            if not entries:
                 continue
-            item = QListWidgetItem(f"{game['game_name']}\nApp ID {game['game_id']}")
-            item.setData(Qt.UserRole, game)
-            self.games_list.addItem(item)
-            if game["game_id"] == selected:
-                self.games_list.setCurrentItem(item)
-        if not self.games_list.currentItem() and self.games_list.count():
-            self.games_list.setCurrentRow(0)
+            header = QListWidgetItem(f"{title}（{len(entries)}）")
+            header.setFlags(Qt.NoItemFlags)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            self.games_list.addItem(header)
+            for game in sorted(entries, key=lambda g: g["game_name"].casefold()):
+                item = QListWidgetItem(f"{game['game_name']}\nApp ID {game['game_id']}")
+                item.setData(Qt.UserRole, game)
+                self.games_list.addItem(item)
+                if game["game_id"] == selected:
+                    self.games_list.setCurrentItem(item)
+        if not self.games_list.currentItem():
+            first = next((i for i in range(self.games_list.count()) if self.games_list.item(i).data(Qt.UserRole)), None)
+            if first is not None:
+                self.games_list.setCurrentRow(first)
+        self.games_list.blockSignals(False)
+        self.choose_game(self.games_list.currentItem())
 
     def choose_game(self, item, previous=None):
         self.game = item.data(Qt.UserRole) if item else None
@@ -435,6 +461,7 @@ class Window(QMainWindow):
         QTimer.singleShot(0, read_local)
         enabled = self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_upload", False)
         self.auto.setChecked(enabled)
+        self.auto_download.setChecked(self.cloud.read_state().get(self.cloud.key(self.engine.account, game), {}).get("auto_download", False))
         records = self.engine.backups(game)
         self.records.setRowCount(len(records))
         sources = {"manual": "手动备份", "cloud_download": "云端下载", "before_cloud_sync": "同步前本地备份", "before_restore": "恢复前本地备份"}
@@ -539,6 +566,26 @@ class Window(QMainWindow):
             game, account = dict(self.game), self.engine.account
             self.task("正在保存自动上传设置…", lambda: self.cloud.set_auto(account, game, enabled), lambda _: self.render_game(),
                       lambda e: (self.render_game(), self.error(e)))
+
+    def toggle_auto_download(self, enabled):
+        if self.require_game():
+            game, account = dict(self.game), self.engine.account
+            self.task("正在保存启动前同步设置…", lambda: self.cloud.set_auto_download(account, game, enabled),
+                      lambda _: self.render_game(), lambda e: (self.render_game(), self.error(e)))
+
+    def launch_game(self):
+        if not self.require_game():
+            return
+        game, account = dict(self.game), self.engine.account
+        def start(result):
+            if self.engine.account != account:
+                return self.error(ValueError("Steam 账号已变化，已取消启动"))
+            self.engine.guard(game)
+            if not QDesktopServices.openUrl(QUrl(f"steam://rungameid/{int(game['game_id'])}")):
+                raise ValueError("无法唤起 Steam，请确认已安装并登录 Steam")
+            self.status.setText(result["message"] + "；已请求 Steam 启动游戏")
+            self.render_game()
+        self.task("正在检查启动前云存档同步，请稍候…", lambda: self.cloud.prepare_game_launch(account, game), start)
 
     def upload(self):
         if not self.require_game():

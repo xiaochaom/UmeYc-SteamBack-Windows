@@ -11,6 +11,13 @@ from .protocol.custom import write_json
 
 
 class WindowsCloud(CloudService):
+    def _download_for_launch(self, account, game, revision, uid):
+        self.download(account, game, revision, uid)
+
+    def prepare_game_launch(self, account, game):
+        self.isolated_engine(account).guard(game)
+        return self._prepare_launch(account, game["game_id"])
+
     def upload(self, account, game, expected_revision=None, expected_uid=None):
         self.isolated_engine(account).guard(game)
         return super().upload(account, game, expected_revision, expected_uid)
